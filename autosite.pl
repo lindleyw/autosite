@@ -14,10 +14,10 @@
 #
 # THIS SOFTWARE IS PROVIDED "AS-IS" WITHOUT WARRANTY OF ANY KIND.
 #
-# $Id: autosite.pl,v 0.8 1980/01/01 14:22:44 bill Exp $
+# $Id: autosite.pl,v 1.6 2004/07/28 17:45:43 bill Exp $
 #
 
-my $debug = 0;
+my $debug;
 my $warnings;
 
 use File::Basename;
@@ -26,7 +26,7 @@ BEGIN {
   push @INC, dirname($0); # So we can find our own modules
 
   # CVS puts the revision here
-  ($version) = '$Revision: 0.8 $ ' =~ /([\d\.]+)/;
+  ($version) = '$Revision: 1.6 $ ' =~ /([\d\.]+)/;
 }
 
 use URI::URL;
@@ -44,6 +44,7 @@ BEGIN {
     # Currently the only command line argument with parameters is -c <template_file>
     getopt ('c:');
     $warnings = $opt_w;
+    $debug    = $opt_d;
 }
 
 use TransientBaby;
@@ -97,17 +98,28 @@ sub normalize_path {
 
     my ($base_file, $rel_link) = @_;
     $base_file =~ tr[\\][/];		# use forward slashes
-    ($base_file_name,$base_file_path,$base_file_suffix) = fileparse($base_file,'\..*');
-    ($rel_link_name,$rel_link_path,$rel_link_suffix) = fileparse($rel_link,'\..*');
+    my ($base_file_name,$base_file_path,$base_file_suffix) = fileparse($base_file,'\..*');
+
+    my $rel_fragment;
+    $rel_fragment = $1 if ($rel_link =~ s/(\#\w*$)//); # remove fragment part
+    return $rel_fragment unless length($rel_link);  # link was fragment only
+
+    #if (($rel_link =~ /\@/) || ($rel_link !~ /\.\w{3,}/)) {
+    #	print "SUSPECT LINK [$rel_link] in $base\n";
+    #}
+
+    my ($rel_link_name,$rel_link_path,$rel_link_suffix) = fileparse($rel_link,'\..*');
     $base_file_path =~ tr[\\][/];		# use forward slashes (again, after fileparse)
     $rel_link_name =~ tr[\\][/];
     # Append path, unless relative to current directory:
     $base_file_path .= $rel_link_path unless ($rel_link_path =~ m{^\.[\\\/]$});
+
     # Resolve '../' relative paths
-    while ($base_file_path =~ s[\w+./\.\./][]g) {};
+    while ($base_file_path =~ s[[\w\-]+./\.\./][]g) {};
     # Concatenate path, name, and suffix
-    $rel_link = $base_file_path . $rel_link_name . $rel_link_suffix;
-    $rel_link =~ s[^./][];		# current directory is implied!
+    $rel_link = $base_file_path . $rel_link_name . $rel_link_suffix . $rel_fragment;
+    $rel_link =~ s[/\./][/]g;           # also change any "xyz/./foo"  to "xyz/foo"
+    $rel_link =~ s[^\./][];		# current directory is implied!
 #    print "NAME = $base_file_name\nPATH = $base_file_path\nSUFFIX = $base_file_suffix\n";
 #    print "-----> $rel_link\n";
     return $rel_link;
@@ -120,7 +132,6 @@ sub relative_path {
     my ($from_file, $to_file) = @_;
     my $relative_path='';
     
-    $base_file =~ tr[\\][/];		# use forward slashes
     ($from_file_name,$from_file_path,$from_file_suffix) = fileparse($from_file,'\..*');
     ($to_file_name,  $to_file_path,  $to_file_suffix  ) = fileparse($to_file,  '\..*');
     $from_file_path =~ tr[\\][/];		# use forward slashes (again, after fileparse)
@@ -177,23 +188,31 @@ sub is_local {
     return !$is_remote;
 }
 
-sub is_html {
+sub is_file_test {
     # Returns TRUE if a file is HTML.
-    my $fname = shift;
+    my ($fname, $filetype, $regex) = @_;
+    $filetype = "is_$filetype"; # as saved in file_info
 
-    if (exists $file_info{$fname} && exists $file_info{$fname}{'is_html'}) {
-	return $file_info{$fname}{'is_html'};
+    if (exists $file_info{$fname} && exists $file_info{$fname}{$filetype}) {
+	return file_info($fname, $filetype);
     }
 
-    return 0 unless is_local($fname);
+    return (file_info($fname, $filetype, 0)) unless is_local($fname);
     my $true_fname = true_location($fname);
-    return 0 unless -e $true_fname;
-    return 0 unless -T $true_fname;
+    return (file_info($fname, $filetype, 0)) unless ((-e $true_fname) && (-T $true_fname));
     open IS_HTML_FILE, $true_fname;
     read(IS_HTML_FILE, my $header, 1024); # Assumes leading <!...> less than 1K
     close IS_HTML_FILE;
     # return TRUE if it looks like we have a start tag.  Also save the value.
-    return ($file_info{$fname}{'is_html'} = $header =~ /<HTML/i);
+    return(file_info($fname, $filetype, $header =~ /$regex/));
+}
+
+sub is_html { # test for HTML
+    return is_file_test(shift, 'html', qr/<HTML/i);
+}
+
+sub is_style { # test for CSS
+    return is_file_test(shift, 'style', qr/{[^\}]+:[^\}]+;[^\}]*}/);
 }
 
 # ---
@@ -338,6 +357,7 @@ my %saved_meta = (
 my %changes = ('href_alt' => 'title');
 
 # Create <LINK REL="---" HREF="---"> for HTML 4.0 capable browsers.
+# NOTE: 'copyright' is handled through the <meta> tag, not here.
 my %link_relations = (
 		      start     => '#/toc*',   # Root node / Main page
 		      parent    => 'parent',
@@ -354,7 +374,6 @@ my %link_relations = (
 		      index     => '/index!',    # Site map
 		      help      => '/help!',
 		      search    => '/search!',
-#		      copyright => '/copyright!', # This is in <meta>, not <link>, tag.
 		      
 		      # NOTES:
 		      #  '/'  refers to root node's info
@@ -385,6 +404,8 @@ my %thumb_defaults = (
 my $thumb_column = 0;
 
 # When inheriting header information from a template
+# NOTE: Most link relations are handled via %link_relations and not through
+# the <meta name="inherit"> mechanism.
 
 my %inherit_headers = (
 		       stylesheet => 'link',  # stylesheets are links
@@ -396,6 +417,7 @@ my %inherit_headers = (
 #   chapter list regardless of their location
 # Otherwise, all the children of the root node are assumed to be chapters.
 my $site_explicit_chapters = 0; # TRUE if explicit chapters
+my $chapter_group = 0;          # used in contents_of to group chapters
 my @chapters; # files which are chapters
 
 my %stylesheets;
@@ -465,7 +487,8 @@ sub process_meta {
 	    $content = '*' . $new_content if $new_content;
 	    $node->attr('content', $content);
 	}
-    } elsif ($meta_name =~ m{\.}) { # looks like an argument we might need later (e.g., 'thumb.regex')
+    } elsif ($meta_name =~ m{\.}) { 
+	# looks like an argument we might need later (e.g., 'thumb.regex')
 	$save_name = lc($meta_name);
     }
 
@@ -477,28 +500,34 @@ sub process_meta {
     }
     if ($meta_name =~ /^inherit$/i) {   # inherit values from Template
 	foreach my $value (split ( ',', $content)) {
-	    # TODO:
-	    # Replace any existing meta information in this file with the supplied values.
-	    # Place those <meta> tags _after_ ourselves.
-	    $value =~ s/\s*//g; # ignore spaces
-	    my $inherit_type = $inherit_header{$content} ? $inherit_header{$content} : $inherit_headers{''}; # meta or link?
-	    my $inherit_attr = ($inherit_type == 'meta') ? 'name' : 'rel';
-	    my $inherit_value = ($inherit_type == 'meta') ? 'content' : 'href';
 
+	    $value =~ s/\s*//g; # ignore spaces
+	    # <meta name="inherit" content="stylesheet"> inherits the stylesheet
+	    # which is a <link>; most others are <meta>.
+	    my $inherit_type  = $inherit_header{$content} ? 
+		$inherit_header{$content} : $inherit_headers{''}; # meta or link.
+	    # use <meta name="attr" content="value"> and <link rel="attr" href="value">
+	    my ($inherit_attr, $inherit_value) = ($inherit_type eq 'meta') ? 
+		('name', 'content') : ('rel', 'href');
+
+	    # Starting at the root, delete all <meta> (or <link>) nodes whose
+	    # name (or rel) is what we are inheriting
 	    my $root = $node->root();
 	    my $existing_tag;
 	    while ($existing_tag = $root->find({'tag' => $inherit_type, $inherit_attr => $value})) {
 		$existing_tag -> delete_node();
 	    }
 
-	    my $newvalue = file_info( file_info($base, 'template'), $value); # value from template
+	    my $file_source = file_info($base, 'template') || file_info('/', 'toc');
+	    my $newvalue = file_info( $file_source, $value); # value from template or site root
 	    if ($inherit_value == 'href') {
-		$newvalue = relative_path($base, $newvalue);
+		# $file_source assumed to be in site root directory
+		$newvalue = relative_path($base, $newvalue); 
 	    }
 
+	    # Add a new tag with the inherited value
 	    my $newnode = TransientHTMLTreeNode->new(attribs => {'tag' => $inherit_type});
 	    $newnode -> attr($inherit_attr => $value, $inherit_value => $newvalue);
-
 	    $node -> unshift_content($newnode);
 	    $node -> unshift_content("\n");
 	}
@@ -513,9 +542,10 @@ sub process_a {
     return 1 unless $startflag;
 
     my $link = $node->attr('href');
+    $link =~ s/#.*$//;				# Remove fragment part of link
+    return unless length($link);
     if (is_local($link)) {
-	$link =~ s/#.*$//;				# Remove fragment part of link
-	my $link = normalize_path($base,$link);
+	$link = normalize_path($base,$link);
 	#print "LINK TO: $link ... is_html=", is_html($link), "\n";
 	if (is_html($link)) {
 	    # Count links to this page
@@ -524,63 +554,72 @@ sub process_a {
 	
 	my $relation = $node->attr('rel');
 	if (defined $relation) {
-#	    print "in $base: $link $relation $tracked_relation{$relation} ... ", is_html($link) , " ... ", !$autotext, "\n";
-	    if ($tracked_relation{$relation} && is_html($link) && !$autotext) {
-		my %chapters = map{ $_, 1} @chapters;
-		# Chapters are automatically all children of the root node,
-		# or only those explicitly given (if at least one is explicit).
-		# Also excludes links we create automatically (as in navigation bars).
-		if ($chapter_relation{$relation}) {
-		    if (!$site_explicit_chapters) { 
-			@chapters = (); # convert to explicit; discard previous implicits
-			$site_explicit_chapters = 1;
-			print "*** EXPLICIT CHAPTERS ***\n" if $warnings;
-		    }
-		    push @chapters, $link unless ($chapters{$link});
-		    # note: modifying $relation here must NOT change file!
-		    file_info($base, 'chapter', $relation); # Save relation as defined
-		    $relation = $chapter_relation{$relation};
-		} elsif ($create_relation{$relation} && !$site_explicit_chapters &&
-			 is_root($base)) {
-		    push @chapters, $link unless ($chapters{$link}); # implicit chapters
-		}
-
-		# Remember child and other relations.
-		$relation = $tracked_relation{$relation};
-		my @children = @{file_info($base, $relation)};
-		my %links = map { $_ => 1 } @children;
-		#print " ($base,$relation) = ", file_info($base,$relation), "\n";;
-		# Set reverse relation in this node
-		if (defined $reverse_relation{$relation}) {
-		    file_info($link, $reverse_relation{$relation}, $base);
-		    #print "\t*$link has $reverse_relation{$relation} $base\n";
-		    #$node->attr('rel',$reverse_relation{$relation});
-		}
-		
-		# Append link to list of this relation.  (A parent can have several children.)
-		unless ($links{$link}) {
-		    if (defined $create_relation{$relation}) {
-			# First and last children have no previous and next, respectively.
-			file_info($link, $create_relation{$relation}, "#")
-			    unless file_info($link, $create_relation{$relation});
-			file_info($link, $reverse_relation{$create_relation{$relation}}, "#")
-			    unless file_info($link, $reverse_relation{$create_relation{$relation}});
-			# Last's next is us; our previous is whoever was formerly last.
-			if (scalar @children) {
-			    file_info($children[-1], $create_relation{$relation}, $link);
-			    #print "\t$children[-1] has $create_relation{$relation} = ",
-			    #file_info($children[-1], $create_relation{$relation}),"\n";
-			    file_info($link, $reverse_relation{$create_relation{$relation}}, $children[-1]);
-			    #print "\t$link has $reverse_relation{$create_relation{$relation}} = ",
-			    #file_info($link, $reverse_relation{$create_relation{$relation}}),"\n";
+	    # print "in $base: $link $relation $tracked_relation{$relation} ... ", is_html($link) , " ... ", !$autotext, "\n";
+	    if ($tracked_relation{$relation} && !$autotext) {
+		if (is_html($link)) {
+		    my %chapters = map{ $_, 1} @chapters;
+		    # Chapters are automatically all children of the root node,
+		    # or only those explicitly given (if at least one is explicit).
+		    # Also excludes links we create automatically (as in navigation bars).
+		    if ($chapter_relation{$relation}) {
+			if (!$site_explicit_chapters) { 
+			    @chapters = (); # convert to explicit; discard previous implicits
+			    $site_explicit_chapters = 1;
+			    print "*** EXPLICIT CHAPTERS ***\n" if $warnings;
 			}
+			push @chapters, $link unless ($chapters{$link});
+			# note: modifying $relation here must NOT change file!
+			file_info($base, 'chapter', $relation); # Save relation as defined
+			$relation = $chapter_relation{$relation};
+		    } elsif ($create_relation{$relation} && !$site_explicit_chapters &&
+			     is_root($base)) {
+			push @chapters, $link unless ($chapters{$link}); # implicit chapters
 		    }
-		    push @children, $link;
-		    file_info($base, $relation, [@children]);  # , $link
-		    # print "  $base has $relation ", join(',',@{file_info($base,$relation)}),"\n";
-		    file_info($base,'head', $children[0]);	# remember firstborn
-		    file_info($base,'tail', $link);             # and lastborn
-		    # print "  $base has head = $children[0]\n";
+		    
+		    # Remember child and other relations.
+		    $relation = $tracked_relation{$relation};
+		    my @children = @{file_info($base, $relation)};
+		    my %links = map { $_ => 1 } @children;
+		    # print " ($base,$relation) = ", file_info($base,$relation), "\n";;
+		    # Set reverse relation in this node
+		    if (defined $reverse_relation{$relation}) {
+			file_info($link, $reverse_relation{$relation}, $base);
+			#print "\t*$link has $reverse_relation{$relation} $base\n";
+			#$node->attr('rel',$reverse_relation{$relation});
+		    }
+		    
+		    # Append link to list of this relation.  (A parent can have several children.)
+		    unless ($links{$link}) {
+			if (defined $create_relation{$relation}) {
+			    # First and last children have no previous and next, respectively.
+			    file_info($link, $create_relation{$relation}, "#")
+				unless file_info($link, $create_relation{$relation});
+			    file_info($link, $reverse_relation{$create_relation{$relation}}, "#")
+				unless file_info($link, $reverse_relation{$create_relation{$relation}});
+			    # Last's next is us; our previous is whoever was formerly last.
+			    if (scalar @children) {
+				file_info($children[-1], $create_relation{$relation}, $link);
+				#print "\t$children[-1] has $create_relation{$relation} = ",
+				#file_info($children[-1], $create_relation{$relation}),"\n";
+				file_info($link, $reverse_relation{$create_relation{$relation}}, $children[-1]);
+				#print "\t$link has $reverse_relation{$create_relation{$relation}} = ",
+				#file_info($link, $reverse_relation{$create_relation{$relation}}),"\n";
+			    }
+			}
+			push @children, $link;
+
+			if (file_info($link, 'seen')) {
+			    file_info($link, 'needed', 1); # Force re-scan of deeper files read too early
+			}
+
+			file_info($base, $relation, [@children]);  # , $link
+			# print "  $base has $relation ", join(',',@{file_info($base,$relation)}),"\n";
+			file_info($base,'head', $children[0]);	# remember firstborn
+			file_info($base,'tail', $link);             # and lastborn
+			# print "  $base has head = $children[0]\n";
+		    }
+		} else {
+		    print STDERR "  In $base: $link not found or not HTML; ignoring.\n" if $warnings;
 		}
 	    } elsif (file_info($base, $relation)) {
 		# use a relative path for relations we create ("head", "parent", etc.)
@@ -594,8 +633,13 @@ sub process_a {
 	    } else {
 		# print "\tIgnoring $relation in $base\n";
 	    }
+	    if ($chapter_group) {  # begin a new group of chapters
+		file_info($link, 'chapter_group', $chapter_group);
+		$chapter_group = 0;
+	    }
+
 	}
-	
+
 	$link = normalize_path($base,$node->attr('href'));		# May have been changed above.
 	#print " >>> $link\n";
 	if ($link eq '#') {
@@ -603,12 +647,12 @@ sub process_a {
 	} elsif (is_html($link)) {
 	    # Set the ALT text to the destination's title
 	    my $alt_text = file_info($link,$changes{'href_alt'});
-	    if (defined $alt_text) {
-		# $node->attr('alt',$alt_text);
+	    if (defined $alt_text || file_info($link, 'seen')) {
+		$node->attr('title',$alt_text);
 		#  print " >>>>>> Resolved $link ... [$alt_text]\n";
 	    } else {
 		# Remember that we must read this file later to resolve the dependency.
-		# print " >>>>>> Unresolved [$link] in [$base] ... must read it later.\n";
+		print " >>>>>> Unresolved [$link] in [$base] ... must read it later.\n" if $debug;
 		file_info($link,'needed',1);
 		file_info($base,'needs',1);
 	    }
@@ -624,26 +668,44 @@ sub process_link {
 
     my $relation = $node->attr('rel');
     my $link = $node->attr('href');
-    $link = normalize_path($base,$link) if (is_local($link));
+    my $alt_link;
 
-#    print "LINK: $relation -> $link\n" if $warnings;
+    if (length($link) && is_local($link)) { # It's a local (not remote) file.
+	$link = normalize_path($base,$link);  # file defaults to be relative to caller's directory
+
+	# GOAL: Allow .html files to move around in the directory tree
+	# structure.  This means that templates, and stylesheets, may
+	# have wrong path information.  For these, strip path off the
+	# filename.  Look in current directory first (permitting local
+	# template/stylesheet overrides) and then failing that in the
+	# site's root directory.
+
+	my ($base_file_name,$base_file_path,$base_file_suffix) = fileparse($link,'\..*');
+	$alt_link = "$base_file_name$base_file_suffix";  # bare filename is relative to TOC's directory
+	# print STDERR " link [$link], alt_link [$alt_link]\n";
+    }
 
     if ($relation =~ /^source$/i) {
 	print "FILE $base GENERATED FROM: $link\n" if $warnings;
 	if (is_html($link)) {
 	    unless (file_info($link, 'seen')) {
 		# flag the generating file as Needed, and return 0 to ignore this file for now.
+		print "   Unresolved <link> $link in $base\n" if $debug;
 		file_info($link, 'needed', 1);
 		file_info($base, 'needs', 1);
 		return 0;
 	    }
 	    # We have already generated the file; fall thru & process the result.
 	} else {
-	    print STDERR "Cannot find generator file $link in $base\n";
+	    print STDERR "Cannot find source file $link in $base\n";
 	    # fall through with normal processing of this file, ignoring the <link>.
 	}
     } elsif ($relation =~ /^template$/i) {
-	print "FILE $base HAS TEMPLATE: $link\n" if $warnings;
+	$link = $alt_link if (!is_html($link) && is_html($alt_link));
+	my $rel_link = relative_path($base, $link);
+	$node -> attr('href', $rel_link);
+
+	print STDERR "  TEMPLATE of $base is $link [", relative_path($base, $link),"] \n" if $warnings;
 	if (is_html($link)) {
 	    unless (file_info($link, 'parse_tree')) {
 		# flag the template as Needed, and return 0 to ignore this file for now.
@@ -651,7 +713,7 @@ sub process_link {
 		file_info($link, 'needed', 1);
 		file_info($link, 'is_template', 1);
 		file_info($base, 'needs', 1);
-		file_info($base, 'template', $link);
+		file_info($base, 'template', relative_path($base, $link));
 		return 0;
 	    }
 
@@ -663,8 +725,21 @@ sub process_link {
 	    # fall through with normal processing of this file, ignoring the <link>.
 	}
     } elsif ($relation =~ /^stylesheet/i) {
-	$stylesheets{$link}++;
-	file_info($base, 'stylesheet', true_location($link));
+	# For convenience in editing sites and moving files into new directories,
+	# this could look in a list of registered stylesheets and choose one which
+	# most closely matches if the specified one is not found.  (e.g., a new file might
+	# have the wrong stylesheet path from having been placed in a deeper directory level.)
+
+	$link = $alt_link if (!is_style($link) && is_style($alt_link));
+	if (is_style($link)) {
+	    $stylesheets{$link}++;
+	    my $rel_link = relative_path($base, $link);
+	    print STDERR "  STYLESHEET of $base is $link [$rel_link] \n" if $warnings;
+	    file_info($base, 'stylesheet', $rel_link);
+	    $node -> attr('href', $rel_link);
+	} else {
+	    print STDERR "  STYLESHEET of $base [$link] not found\n";
+	}
     } else {
 	# The root node may declare some site-wide links.
 	# Other links should be created from the site content as we discover it.
@@ -717,7 +792,7 @@ sub process_head {
 		my $title = file_info($value, 'navtitle');
 		$title = file_info($value, 'title') unless $title;
 		$value = relative_path($base, $value);
-		$node->get_previous()->push_content("<link rel='$linkrel' href='$value' title='$title'>\n");
+		$node->get_previous()->push_content("<link rel=\"$linkrel\" href=\"$value\" title=\"$title\">\n");
 	    }
 	}
     }
@@ -780,6 +855,7 @@ sub process_img {
 		    $node->attr('alt',$alt_text);
 		} elsif (is_html($href_rel_path)) {
 		    # Remember that we must read this file later to resolve the dependency.
+		    print "   Unresolved <href> $href_rel_path in $base\n" if $debug;
 		    file_info($href_rel_path,'needed',1);
 		    file_info($base,'needs',1);
 		}
@@ -798,7 +874,9 @@ sub process_img {
 sub process_autosite {
     my ($node, $startflag, $depth) = @_;
 
-    if ($startflag && $node->attr('class') =~ /^autosite/i) {
+    if ($startflag && $node->attr('class') =~ /^chapter_group/i) {
+	$chapter_group = $node->attr('title') || '~~';  # either the title, or '~~' for default
+    } elsif ($startflag && $node->attr('class') =~ /^autosite/i) {
 	# <DIV CLASS="autosite" ID="function.with.args">...</DIV> have their
 	# content removed and replaced with text from function('with','args')
 	$node->delete_content(1); # delete all content
@@ -826,6 +904,15 @@ sub process_autosite {
     return 1;
 }
 
+sub process_stopped {
+    my ($node, $startflag, $depth) = @_;
+
+    my $error =  "ERROR in $base -- cannot parse at approximately:\n" .  substr($node->attr('text'), 0, 80), "\n";
+    # print $error;
+    # print STDERR $error;
+    die $error;
+}
+
 
 # -----------------------------
 #
@@ -850,6 +937,7 @@ my %tag_processor = (
 		     'ins'        => \&process_autosite,
 		     'div'        => \&process_autosite,
 		     'span'       => \&process_autosite,
+		     'stopped'    => \&process_stopped,
 		     );
 
 sub process_entry {
@@ -933,8 +1021,10 @@ sub linkify {
     return "<A HREF=\"$link\"$class$id$style>$text</A>";
 }
 
-sub full_contents_of {
-    my ($node, $level, $style) = @_;
+######################
+
+sub _contents_of {
+    my ($node, $level, $style, $recurse) = @_;
     my ($my_html, $pre_html, $post_html, $my_pre_html, $my_post_html);
     my $id = ($node eq $base) ? 'current-nav' : '';  # current-nav ID so we can set <STYLE>
     my $title = file_info($node, 'navtitle');  # Default to navigation title
@@ -963,6 +1053,8 @@ sub full_contents_of {
 # possibly useful if you wanted the Root in the same type of content:
 #	    $my_pre_html = $pre_html; $my_post_html = $post_html;
 	}
+    } elsif ($style =~ /\bbullets?\b/i) {
+	$my_html = "<nobr>&#149; $link_html</nobr> ";
     } else {
 	$my_html = '&nbsp' x ($level * 2) . $link_html . "<BR>\n";
     }
@@ -973,11 +1065,14 @@ sub full_contents_of {
     if (scalar @children) {
 	$html .= "$my_html$pre_html";
 	foreach (@children) {
-	    if (file_info($_, 'needed')) {    # We depend on all files
+#	    if (file_info($_, 'needed')) {    # We depend on all files
+	    unless (file_info($_, 'seen')) {    # Wait until all files are seen once
+		# (seen, not necessarily totally finished, to eliminate infinite dependency)
+		print "        Child $_ not yet read.\n" if $debug;
 		$html = '~~~unresolved~~~';   # so if there is even one file not yet read in,
 		break;                        # stop now and flag the calling file with Needs.
 	    }
-	    $html .= full_contents_of($_, $level + 1, $style);
+	    $html .= _contents_of($_, $level + 1, $style, $recurse);
 	}
 	$html .= $post_html;
     } else {
@@ -987,29 +1082,53 @@ sub full_contents_of {
     return $html;
 }
 
-sub full_contents {
-    # Return html containing indented tree with contents of entire site
-    # in HTML:
-    #    <span class="autosite" id="full_contents.ul></span>
-    # or <span class="autosite" id="full_contents.ol-1Aia></span>
-    # 'ul' means use Unordered list; 'ol' means ordered list;
-    # omit for indented with nonbreak spaces.
-    my $root = file_info('/', 'toc');
+sub _contents {
+    # Base routine for contents() and full_contents()
+    my ($root, $style, $recurse) = @_;
+    print STDERR "_contents ($root, $style, $recurse)\n";
     my $level = 0;
     my $html = '';
-    my $style = shift;
 
-    my $content_table = full_contents_of($root, $level, $style);
+    my $content_table = _contents_of($root, $level, $style, $recurse);
     if ($content_table =~ '~~~unresolved~~~') {
 	file_info($base, 'needs', 1); # Build this page only after all other files read in.
+	print "_contents:  $base must wait because content_table is:  [$content_table]\n" if $debug;
     } else {
 	$html .= $content_table;
     }
     return $html;
 }
 
+sub contents {
+    # Return html containing indented tree with nested contents of current node
+    my $style = shift;
+    return _contents($base, $style, 1);
+}
+
+sub children {
+    # Return html containing indented tree with contents of current node,
+    # next-level documents (children) only
+    my $style = shift;
+    return _contents($base, $style, 0);
+}
+
+sub full_contents {
+    # Return html containing indented tree with contents of entire site
+    # in HTML:
+    #    <span class="autosite" id="full_contents.ul"></span>
+    # or <span class="autosite" id="full_contents.ol-1Aia"></span>
+    # 'ul' means use Unordered list; 'ol' means ordered list;
+    # omit for indented with nonbreak spaces.
+    my $style = shift;
+    my $recurse = ($style =~ /\btop\b/) ? 0 : 1 ; # top only?  default is all.
+    return _contents(file_info('/', 'toc'), $style, $recurse);
+}
+
+######################
+
 sub sidenav_element {
     my ($node, $level, $style) = @_;
+    my $divider_prefix;
     my $link_prefix;
     my $link_suffix = "<BR>\n";
 
@@ -1021,6 +1140,14 @@ sub sidenav_element {
     # default to regular title:
     $node_title = file_info($node, 'title') unless $node_title; 
 
+    my $group_heading = file_info($node, 'chapter_group');
+    if ($group_heading) {
+	$divider_prefix = "<HR>";
+	if ($group_heading ne '~~') {  # other than default horiz-rule-only
+	    $divider_prefix .= "\n<p class='chapter_group'>$group_heading</p>\n";
+	}
+    }
+
     # Compute path from containing file to this node and create link
     my $nav_class = 'sidenav';
     my $nav_id = ($node eq $base) ? 'current-nav' : '';  # current-nav ID for use with <STYLE>
@@ -1031,12 +1158,31 @@ sub sidenav_element {
     if ($style =~ /\bindent(\d*)/) { # use text-indent property
 	my $multiple = $1 || 7; # specified or default to 0.7 em
 	$nav_style .= "margin-left: " . $level * $multiple / 10 . "em;";
+    } elsif ($style =~ /\b(ul|ol)\b/) { # ordered or unordered list
+	$link_prefix = "<li>";
+	$link_suffix = "</li>";
     } else {
 	$link_prefix = "&nbsp;&nbsp;" x $level;
     }
     my $link_html = linkify(relative_path($base, $node), $node_title,
 			    $nav_class, $nav_id, $nav_style);
-    return "$link_prefix$link_html$link_suffix";
+    return "$divider_prefix$link_prefix$link_html$link_suffix";
+}
+
+sub sidenav_list {
+    my ($level, $style, $exiting) = @_;
+    my $html_modifier = '';
+    
+    if ($style =~ /\b(ul|ol)(?:-(\w+))?/) {  # use (un)ordered list
+	if (!$exiting) {
+	    $html_modifier .= ' class="sidenavlist"';
+	    if ($2) {
+		$html_modifier .= ' type="' . substr($2, $level, 1) . '"';
+	    }
+	}
+	return ($exiting ? "</$1" : "<$1") . $html_modifier . ">\n";
+    }
+    return '';
 }
 
 sub sidenav {
@@ -1050,6 +1196,8 @@ sub sidenav {
     my @use_chapters = ($adam, @chapters);
     my $return_html;
 
+    $return_html .= sidenav_list(0, $style, 0); # optionally enter list
+
     # trace ancestry back to the first generation (TOC)
     if ($parent eq $adam) {
 	$ancestor = $base; # We are Adam, the TOC.
@@ -1059,6 +1207,10 @@ sub sidenav {
 	while (($parent ne $adam) && length($parent)) {
 	    $ancestor = $parent; 
 	    unshift @begats, $parent;
+	    if (file_info($parent, 'needed')) {
+		file_info($base, 'needed', 1);  # Haven't read parent yet, rescan this file later.
+	    }
+
 	    $parent = file_info($parent,'parent');
 	}
     }
@@ -1071,9 +1223,11 @@ sub sidenav {
 	    if (scalar @begats == 1) { # our siblings are the chapters - only show children under us
 		$return_html .= sidenav_element($_, $indent++, $style);
 		if ($style =~ /\bchild\b/i) {
+		    $return_html .= sidenav_list($indent, $style, 0); # optionally enter list
 		    foreach my $node (@{file_info($base, 'child') || []}) {
 			$return_html .= sidenav_element($node, $indent + 1, $style);
 		    }
+		    $return_html .= sidenav_list($indent, $style, 1); # end list
 		}
 	    	next;
 	    }
@@ -1082,23 +1236,28 @@ sub sidenav {
 		$return_html .= sidenav_element($node, $indent++, $style);
 		# List our siblings under our parent
 		if ($node eq $parent) {
+		    $return_html .= sidenav_list($indent, $style, 0); # optionally enter list
 		    foreach my $node (@{file_info($parent, 'child') || []}) {
 			$return_html .= sidenav_element($node, $indent, $style);
 			next unless ($node eq $base);
 			$self_listed++;
 			# List our children under us
 			if ($style =~ /\bchild\b/i) {
+			    $return_html .= sidenav_list($indent, $style, 0); # optionally enter list
 			    foreach my $node (@{file_info($base, 'child') || []}) {
 				$return_html .= sidenav_element($node, $indent + 1, $style);
 			    }
+			    $return_html .= sidenav_list($indent, $style, 1); # end list
 			}
 		    }
+		    $return_html .= sidenav_list($indent, $style, 1); # end list
 		}
 	    }
 	} else { # Chapter, but not our ancestor
 	    $return_html .= sidenav_element($_, 0, $style);
 	}
     }
+    $return_html .= sidenav_list(0, $style, 1); # end list
     return $return_html;
 }
 
@@ -1109,7 +1268,7 @@ sub makerelative {
     my $func = shift;
     my $text = $func->();
     # print "makerelative:  [[ $text ]] -> ";
-    $text =~ s/(href|src)\s*=\s*"([^#\"]+)(\#[^\"]*)?"/"$1=\"" . relative_path($base,$2) . "$3\""/sgie;   
+    $text =~ s/(href|src|background)\s*=\s*"([^#\"]+)(\#[^\"]*)?"/"$1=\"" . relative_path($base,$2) . "$3\""/sgie;   
     # print "[[ $text ]]\n";
     return $text;
 }
@@ -1335,13 +1494,13 @@ while (scalar (@files = unresolved())) {
 		close FILE;
 	    }
 	} else {
+	    print "     Flagged for reprocess: $base\n" if $debug;
 	    file_info($base,'needed',1);	# Show we must process it again
-	    # print "     Flagged for reprocess: $base\n";
 	}
 
 	# Either save or dispose of the HTML parse tree
 	if (file_info($base, 'is_template')) {
-#	    print STDERR "Saving template $base\n";
+	    print STDERR "Saving template $base\n" if $debug;
 	    # Remove items processed by TransientBits
 	    file_info($base, 'readonly', 1); # Do not save stripped version!
 	    foreach my $remove_transient qw(form email macro) {
@@ -1410,7 +1569,7 @@ foreach my $pfile (sort keys %file_info) {
     foreach (@infos) {
 	print REPORT "<td>$_</td><td>";
 	my $value = $file_info{$pfile}{$_};
-	if (is_html($value)) {
+	if ($value =~ /\.htm/ && is_html($value)) {
 	    $value = "<a href='$value'>$value</a>"
 	    }
 	print REPORT "[$value]</td></tr>\n";
