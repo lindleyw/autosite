@@ -1,0 +1,2 @@
+../autosplit.pl site_generator.html
+../autosite.pl -c template.html index.html
