@@ -1,5 +1,3 @@
-#!/usr/bin/perl --
-
 # htmlparse
 # Parse an HTML file, and all its referenced files, and 
 # verify that all referenced files exist.  Also check the
@@ -9,27 +7,20 @@
 # Hacked by William Lindley   wlindley@wlindley.com
 #
 
+use HTML::Element;
+use HTML::Parser;
+use HTML::TreeBuilder;
 use URI::URL;
 use Cwd;
 
-if (1) { 
-    use TransientBaby;
-    use TransientBits (template_file => 'site_template.htm');
-#    use TransientHTMLTree;
-    use TransientTreeBuilder;  # need to do this once it works
-} else {
-    use HTML::Element;
-    use HTML::Parser;
-    use HTML::TreeBuilder;
-    
-    sub HTML::TreeBuilder::comment { # CHEAT
-	my $self = shift;
-	my $pos = $self->{'_pos'};
-	$pos = $self unless defined($pos);
-	my $ele = HTML::Element->new('comment');
-	$ele->push_content(shift);
-	$pos->push_content($ele);
-    }
+sub HTML::TreeBuilder::comment { # CHEAT
+    my $self = shift;
+    my $pos = $self->{'_pos'};
+    $pos = $self unless defined($pos);
+    my $ele = HTML::Element->new('comment');
+    $ele->push_content(shift);
+    $pos->push_content($ele);
+}
 
 =head2 $h->attrs()
 
@@ -37,85 +28,66 @@ Returns a list of attributes defined for the element.
 
 =cut
 
-    sub HTML::Element::attrs {
-	# Return a list of all attributes defined for the element
-	# wlindley@wlindley.com 1999-10-27
-	my $self = shift;
-	my @attrs = ();
-	for (sort keys %$self) {
-	    next if /^_/;
-	    push @attrs, $_;
-	}
-	return @attrs;
+sub HTML::Element::attrs {
+    # Return a list of all attributes defined for the element
+    # wlindley@wlindley.com 1999-10-27
+    my $self = shift;
+    my @attrs = ();
+    for (sort keys %$self) {
+	next if /^_/;
+	push @attrs, $_;
     }
-    
-    sub HTML::Element::starttag
-    {
-	# Modified wlindley@wlindley.com 1999-10-27
-	# to use Netscape style comments
-	my $self = shift;
-	my $name = $self->{'_tag'};
-	return "<!--" if ($name eq 'comment');	# wl 1999-10-27
-	my $tag = "<\U$name";
-	for (sort keys %$self) {
-	    next if /^_/;
-	    my $val = $self->{$_};
-	    if ($_ eq $val &&
-		exists($boolean_attr{$name}) && $boolean_attr{$name} eq $_) {
-		$tag .= " \U$_";
-	    } else {
-		if ($val !~ /^\d+$/) {
-		    # count number of " compared to number of '
-		    if (($val =~ tr/\"/\"/) > ($val =~ tr/\'/\'/)) {
-			# use single quotes around the attribute value
-		      HTML::Entities::encode_entities($val, "&'>");
-			$val = qq('$val');
-		    } else {
-		      HTML::Entities::encode_entities($val, '&">');
-			$val = qq{"$val"};
-		    }
-		}
-		$tag .= qq{ \U$_\E=$val};
-	    }
-	}
-	"$tag>";
-    }
-
-    sub HTML::Element::endtag
-    {
-	# Modified wlindley@wlindley.com 1999-10-27
-	# to use Netscape style comments
-	return "-->" if ($_[0]->{'_tag'} eq 'comment');	# wl 1999-10-27
-	"</\U$_[0]->{'_tag'}>";
-    }
-
-    # We want the ending tags in place, so we have
-    # removed from the below list:  p, th, tr, td, li, dt, dd .
-    %HTML::Element::optionalEndTag = map { $_ => 1 } qw(option);
+    return @attrs;
 }
+    
+sub HTML::Element::starttag
+{
+    # Modified wlindley@wlindley.com 1999-10-27
+    # to use Netscape style comments
+    my $self = shift;
+    my $name = $self->{'_tag'};
+    return "<!--" if ($name eq 'comment');	# wl 1999-10-27
+    my $tag = "<\U$name";
+    for (sort keys %$self) {
+	next if /^_/;
+	my $val = $self->{$_};
+	if ($_ eq $val &&
+	    exists($boolean_attr{$name}) && $boolean_attr{$name} eq $_) {
+	    $tag .= " \U$_";
+	} else {
+	    if ($val !~ /^\d+$/) {
+		# count number of " compared to number of '
+		if (($val =~ tr/\"/\"/) > ($val =~ tr/\'/\'/)) {
+		    # use single quotes around the attribute value
+		    HTML::Entities::encode_entities($val, "&'>");
+		    $val = qq('$val');
+		} else {
+		    HTML::Entities::encode_entities($val, '&">');
+		    $val = qq{"$val"};
+		}
+	    }
+	    $tag .= qq{ \U$_\E=$val};
+	}
+    }
+    "$tag>";
+}
+
+sub HTML::Element::endtag
+{
+    # Modified wlindley@wlindley.com 1999-10-27
+    # to use Netscape style comments
+    return "-->" if ($_[0]->{'_tag'} eq 'comment');	# wl 1999-10-27
+    "</\U$_[0]->{'_tag'}>";
+}
+
+# We want the ending tags in place, so we have
+# removed from the below list:  p, th, tr, td, li, dt, dd .
+%HTML::Element::optionalEndTag = map { $_ => 1 } qw(option);
 
 # -----------------------------
 
-my %file_info;
-
-sub image_size {
-    # Returns width, height of image
-    my $fname = shift;
-    if (exists $file_info{$fname} && exists $file_info{$fname}{'width'}) {
-	return ($file_info{$fname}{'width'},$file_info{$fname}{'height'});
-    }
-    if (-e $fname) {
-	open IMAGE, $fname;
-	my $bytesread = read(IMAGE, my $gif_header, 12);
-	close IMAGE;
-	return undef unless ($bytesread == 12);
-	my ($id, $width, $height) = unpack ("a6vv",$gif_header);
-	return undef unless ($id eq "GIF89a");
-	($file_info{$fname}{'width'},$file_info{$fname}{'height'}) = ($width, $height);
-	return ($width, $height);
-    }
-    return undef;
-}
+my %file_info;	# Key is file's relative path.
+	# This is a hash of hashes.  Use the file_info() sub to access.
 
 sub file_info {
     # Set or get information about a file.
@@ -139,6 +111,25 @@ sub unresolved {
     return grep {length($_) && (file_info($_,'needed') || file_info($_,'needs'))} (keys %file_info);
 }
 
+sub image_size {
+    # Returns width, height of a .gif image
+    my $fname = shift;
+    if (exists $file_info{$fname} && exists $file_info{$fname}{'width'}) {
+	return ($file_info{$fname}{'width'},$file_info{$fname}{'height'});
+    }
+    if (-e $fname) {
+	open IMAGE, $fname;
+	my $bytesread = read(IMAGE, my $gif_header, 12);
+	close IMAGE;
+	return undef unless ($bytesread == 12);
+	my ($id, $width, $height) = unpack ("a6vv",$gif_header);
+	return undef unless ($id eq "GIF89a");
+	($file_info{$fname}{'width'},$file_info{$fname}{'height'}) = ($width, $height);
+	return ($width, $height);
+    }
+    return undef;
+}
+
 # -----------------------------
 
 sub is_html {
@@ -155,7 +146,7 @@ sub is_html {
     read(IS_HTML_FILE, my $header, 1024);	# Read up to 1024 bytes
     close IS_HTML_FILE;
     # return TRUE if it looks like we have a start tag.  Also save the value.
-    return ($file_info{$fname}{'is_html'} = $header =~ /<HTML/i);
+    return ($file_info{$fname}{'is_html'} = $header =~ /<HTML/);
 }
 
 sub is_local {
@@ -240,12 +231,8 @@ sub relative_path {
 # Documents containing "child" links will "adopt" their children, and any child's
 # "parent" link will automatically be updated to its adoptive parent.
 
-# Save these relations:
-my %tracked_relation = map { $_ => 1 } qw(child extra chapter);	
-# Chapters become children:
-my %convert_relation = ('chapter' => 'child'); 
-# 'next' node (and reverse, 'prev') created from child:
-my %create_relation = ('child' => 'next');     
+my %tracked_relation = map { $_ => 1 } qw(child extra);	# Save these relations
+my %create_relation = ('child' => 'next');		# 'next' node (and reverse, 'prev') created from child
 
 # "extra" is like "child" but is exempt from the next/prev navigation.
 my %reverse_relation = (
@@ -256,13 +243,6 @@ my %reverse_relation = (
 
 # 
 my %changes = ('href_alt' => 'title');
-
-# Maintain list of Chapters for navigation bar.
-# If the site contains <A HREF="xxx" REL="chapter"> these are kept in the
-#   chapter list regardless of their location
-# Otherwise, all the children of the root node are assumed to be chapters.
-my $site_explicit_chapters = 0; # TRUE if explicit chapters
-my @chapters; # files which are chapters
 
 # -----------------------------
 
@@ -276,8 +256,7 @@ sub process_entry {
 
     my $tag;
     
-    # unless (ref($node)) {     # HTML::TreeBuilder way of doing things
-    if ($node->tag() eq 'lit') { # literal text
+    unless (ref($node)) {
 	if ($grab_header) {	# save text of this entity
 	    $header .= $node;
 	}
@@ -290,8 +269,8 @@ sub process_entry {
     $tag = $node->tag();
     $tag_stack[$depth] = $node;
 
-# print "<$tag>  ($startflag, $depth)\n";
-    if ($tag eq 'title' && $startflag) {
+    #print "<$tag>  ($startflag, $depth)\n";
+    if ($tag eq 'title') {
 	file_info($base, 'title_ref', $node);			# Save reference to TITLE element
     }
 
@@ -328,7 +307,7 @@ sub process_entry {
 	if (is_local($link)) {
 	    $link =~ s/#.*$//;				# Remove fragment part of link
 	    my $link = normalize_path($base,$link);
-# print "LINK TO: $link ... is_html=", is_html($link), "\n";
+	    #print "LINK TO: $link ... is_html=", is_html($link), "\n";
 	    if (is_html($link)) {
 		# Count links to this page
 		file_info($link, 'links_to', file_info($link, 'links_to')+1);
@@ -338,17 +317,6 @@ sub process_entry {
 	    if (defined $relation) {
 		if ($tracked_relation{$relation} && is_html($link)) {
 		    # Remember child relations.
-
-		    if ($relation eq 'chapter') {
-			if (!$site_explicit_chapters) { 
-			    @chapters = (); # convert to explicit
-			    $site_explicit_chapters = 1;
-			}
-			push @chapters, $link;
-		    } elsif ($relation eq 'child' && !$site_explicit_chapters &&
-			     $base eq file_info('/', 'toc')) {
-			push @chapters, $link;
-		    }
 		    my @children = split('\|', file_info($base, $relation));
 		    my %links = map { $_ => 1 } @children;
 		    #print " ($base,$relation) = ", file_info($base,$relation), "\n";;
@@ -386,7 +354,7 @@ sub process_entry {
 		    $new_href = relative_path($base,$new_href) unless $new_href =~ /^#/;
 		    $node->attr('href', $new_href);
 		    print "\tSetting HREF of $relation to $new_href\n";
-		} elsif ($relation eq 'toc' || $relation eq 'contents') {
+		} elsif ($relation eq 'toc') {
 		    $node->attr('href', relative_path($base,file_info('/','toc')));
 		} else {
 		    #print "\tIgnoring $relation in $base\n";
@@ -475,38 +443,6 @@ sub process_entry {
 
 #-------------------
 
-sub sidenav {
-    # create the sidebar navigation
-    my $adam = file_info("/","toc"); # name of the file in the first generation
-    my $ancestor; # the child off '/' who is our progenitor
-    my $parent = $base;
-    my @begats;
-
-    # trace ancestry back to the first generation
-    while (($parent ne $adam) && length($parent)) {
-	$ancestor = $parent; 
-	unshift @begats, $parent;
-	$parent = file_info($parent,'parent');
-	#print "($parent)";
-    }
-    #print "[[[$ancestor]]]  adam = $adam\n";
-
-    my @adams_kids = split('\|', file_info($adam, 'child'));
-    foreach (@adams_kids) {
-	print "$_\n";
-	if ($_ eq $ancestor) { # insert our family tree here
-	    my $indent=0;
-	    foreach (@begats) {
-		next unless $indent++;
-		print " " x $indent, "$_\n";
-	    }
-	}
-    }
-}
-
-
-#-------------------
-
 use File::DosGlob 'glob';  # override CORE::glob
 
 undef $/;
@@ -538,16 +474,11 @@ while (scalar (@files = unresolved())) {
 	print "Reading $base\n";
 	file_info($base,'seen',1);	# Remember we have seen this file at least once.
 
-	if ($base eq file_info('/', 'toc')) {
-	    # clear chapter list - we could process this node several times.
-	    @chapters = ();
-	}
-
 	open FILE, $base;
 	$text = <FILE>;
 	close FILE;
 
-	$h = new TransientTreeBuilder; # HTML::TreeBuilder;
+	$h = new HTML::TreeBuilder;
 
 	$h->ignore_unknown(0);
 	$h->warn(1);
@@ -569,7 +500,6 @@ while (scalar (@files = unresolved())) {
 
 	    open FILE, ">$base";
 	    print "WRITING: $base\n";
-	    sidenav();
 	    print FILE $new_text;
 	    print FILE "\n";
 	    close FILE;
@@ -580,7 +510,4 @@ while (scalar (@files = unresolved())) {
 	$h->delete();
     }
 }
-
-print "Chapters:\n", join ("\n", @chapters);
-
 __END__;
