@@ -607,7 +607,7 @@ sub parse_html {
       print "stopped at: -->$foo\n" if($debug);
       if($foo) {
         # this is an error condition
-        $callback->($accessor, tag=>'stopped', text=>$foo) 
+	  $callback->($accessor, tag=>'stopped', text=>$foo);
       }
       # else {
       #  # this is not

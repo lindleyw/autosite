@@ -10,8 +10,12 @@ use TransientBaby;
 sub new {
   my $me = {};
   my $pack = shift();
-  my $fn = shift();
+  my $copy_from = shift();
   bless $me, $pack;
+  if ($copy_from) {
+      $me->{root} = $copy_from->copy();
+  }
+  return $me;
 };
 
 %nonnesting_tags = map { $_ => 1 } qw(
@@ -19,6 +23,17 @@ sub new {
   area base fontbase br col frame img input isindex link meta param
 );
 # %nonnesting_tags = map { $_ => 1 } qw(lit comment);
+
+# wl 2003-11-04:
+# There is code in TransientBaby to handle self-closing tags, e.g.:   <BR />
+# which perhaps could be modified to set a key in the attribs hash like:
+#    $current->set_attribs('/' -> 1);
+# and which we could then set and use below along with %nonnesting_tags
+# so that "<BR>" and "<BR />" would be handled the same... actually reading
+# "<BR>" would create "<BR />" in the output which is (maybe?) a good thing.
+# Or we could set_attribs('/', 'explicit') and set_attribs('/', 'implicit')
+# so output would be the same as input.
+# In either case, regen() and element_html() would have to respect the '/'.
 
 sub parse {
   # build a tree
@@ -61,22 +76,23 @@ sub parse {
        
     } elsif($current and $nonnesting_tags{$current->tag()}) {
         # the current tag can never have children and enclose things. dont nest.
-
-       while($current->get_next()) { $current = $current->get_next(); }; # xxx
        my $newnode = TransientHTMLTreeNode->new();
-       print "debug: attaching node ", $newnode->get_nodenumber(), " next to (nonnest) ", $current->get_nodenumber(), "\n" if($debugf);
        $newnode->set_attribs(\%keyvals);
        $newnode->set_parent($current->get_parent());
+
+       while($current->get_next()) { $current = $current->get_next(); }; # xxx
+       print "debug: attaching node ", $newnode->get_nodenumber(), " next to (nonnest) ", $current->get_nodenumber(), "\n" if($debugf);
+
        $current->set_next($newnode);
        $newnode->set_previous($current);
        $current = $newnode;
 
     } else {
        # the current tag can have children and enclose things. hang off of it.
-
        my $newnode = TransientHTMLTreeNode->new();
-       $newnode->set_parent($current);
        $newnode->set_attribs(\%keyvals);
+       $newnode->set_parent($current);
+
        if(!$current->get_child()) {
          # first and only child
          $current->set_child($newnode) or die;
@@ -140,7 +156,7 @@ sub regen {
     $ob = shift();
 
     if($tag->{tag} eq 'lit' or
-      $tag->{tag} eq 'comment') {
+       $tag->{tag} eq 'comment') {
       $html .= $tag->{text};
     } elsif($tag->{tag}) {
       $html .= '<' . $tag->{tag};
@@ -163,7 +179,6 @@ sub regen {
 package TransientHTMLTreeNode;
 
 $nodenumber=1;
-$allnodes = {};
 
 sub new {
   my $pack = shift();
@@ -171,7 +186,6 @@ sub new {
   $me->{'nodenumber'} = $nodenumber;
   $nodenumber++;
   bless $me, $pack;
-  $allnodes->{$nodenumber} = $me;
   return $me;
 }
 
@@ -226,8 +240,14 @@ sub attr {
   my $me = shift();
   my $att = shift();
   my $repl = shift();
-  if(defined $repl) {
-    $me->get_attribs()->{$att} = $repl;
+  while (defined $repl) { # multiple attribute replacements may be passed
+      if (length($repl) == 0) {
+	  delete $me->get_attribs()->{$att}; # remove attributes with empty text
+      } else {
+	  $me->get_attribs()->{$att} = $repl;
+      }
+      (my $nextatt, $repl) = (shift(), shift());
+      $att = $nextatt if $nextatt;
   }
   return $me->get_attribs()->{$att};
 }
@@ -240,7 +260,7 @@ sub delete_content {
   my $me = shift;
   my $all_content = shift;	# TRUE = all content, else literals only
   my $node = $me->get_child();
-  # iteratively derefrence "lit" nodes untill a non-lit node is found
+  # iteratively derefrence "lit" nodes until a non-lit node is found
   while($node and ($all_content or $node->get_attribs()->{tag} eq 'lit')) {
     $node = $node->get_next();
     if($node) {
@@ -253,29 +273,57 @@ sub delete_content {
   return 1;
 }
 
+sub _content_node {
+  my $text = shift;
+
+  my $newnode;
+  if (ref ($text)) {
+      $newnode = $text; # move existing node into tree
+  } else {
+      # create a new text literal node
+      $newnode = TransientHTMLTreeNode->new();
+      $newnode->set_attribs({tag=>'lit', text=>$text});
+  }
+  return $newnode;
+}
+
 sub unshift_content {
+  # Inserts text or a node as a child below the current node,
+  # before any existing child nodes.
   my $me = shift;
   my $text = shift;
-  my $newnode = TransientHTMLTreeNode->new();
-  $newnode->set_attribs({tag=>'lit', text=>$text});
-  $newnode->set_next($me->get_child());
-  $newnode->set_previous(undef);
+
+  my $newnode = _content_node($text);
+  my $newtail = $newnode;
+  while ($newtail->get_next()) {
+      $newtail = $newtail->get_next();
+      $newtail->set_parent($me);
+  }
   $newnode->set_parent($me);
+
+  $newtail->set_next($me->get_child());
+  $newnode->set_previous(undef);
   if($me->get_child()) {
-    $me->get_child()->set_previous($newnode);
+    $me->get_child()->set_previous($newtail);
   }
   $me->set_child($newnode);
   return 1;
 }
 
 sub push_content {
+  # Inserts text or a node as a child below the current node,
+  # after any existing child nodes.
   my $me = shift;
   my $text = shift;
   my $node = $me->get_child();
   my $lastnode;
 
-  my $newnode = TransientHTMLTreeNode->new();
-  $newnode->set_attribs({tag=>'lit', text=>$text});
+  my $newnode = _content_node($text);
+  my $newtail = $newnode;
+  while ($newtail->get_next()) {
+      $newtail = $newtail->get_next();
+      $newtail->set_parent($me);
+  }
   $newnode->set_parent($me);
 
   if($node) {
@@ -284,9 +332,9 @@ sub push_content {
       $node = $node->get_next();
     }
     # first non-lit tag: insert before. $lastnode<->$newnode<->$node
-    $newnode->set_next($node);
+    $newtail->set_next($node);
+    $node->set_previous($newtail) if($node);
     $newnode->set_previous($lastnode);
-    $node->set_previous($newnode) if($node);
     if($lastnode) {
       $lastnode->set_next($newnode) 
     } else {
@@ -301,6 +349,7 @@ sub push_content {
 }
 
 sub delete_node {
+  # Deletes a node and its children.
   my $me = shift;
   my $parent = $me->get_parent();
   my $prev = $me->get_previous();
@@ -315,14 +364,18 @@ sub delete_node {
 }
 
 sub remove_node {
+  # Deletes a node.  Its children, if any, take its place.
   my $me = shift;
   my $parent = $me->get_parent();
   my $prev = $me->get_previous();
   my $next = $me->get_next();
   my $child = $me->get_child();
   if($child) {
-    $parent->set_child($child) unless($prev);
-    $prev->set_next($child) if($prev);
+    if($prev) {
+	$prev->set_next($child);
+    } else {
+	$parent->set_child($child);
+    }
     $child->set_previous($prev);
     $child->set_parent($parent);
     $child->set_next($next);
@@ -331,7 +384,79 @@ sub remove_node {
     return $me->delete_node();
   }
 }
-  
+
+sub root {
+  # Returns the node's root
+  my $me = shift;
+  while ($me->get_parent()) {
+      $me = $me->get_parent();
+  }
+  return $me;
+}
+
+sub copy {
+    # returns a copy of a node and its children
+    my $me = shift;
+    my $parent = shift;
+
+    my $cursor = $me;           # source node
+    my $new_node;               # destination node
+    my $first_node;
+    my $prev;                   # destination: previous node
+
+    while($cursor) {
+
+	$new_node = TransientHTMLTreeNode->new();
+
+        # copy attributes by creating new anonymous hash
+	$new_node->set_attribs({%{$cursor->get_attribs()}});
+	#print join('|', %{$new_node->get_attribs()}), "\n";
+
+	$new_node->set_parent($parent);                  # maintain parent relation
+	$new_node->set_previous($prev);                      # doubly linked list
+	if ($prev) {
+	    $prev->set_next($new_node);
+	} else {
+	    $parent->set_child($new_node) if $parent;
+	}
+	if($cursor->get_child()) {                       # copy each of our children
+	    $cursor->get_child()->copy($new_node);             # our 'me' will be parent of the new child
+	}
+	$prev = $new_node;                                 # we will be the previous node next time 'round
+	$first_node = $new_node unless $first_node;
+	$cursor = $cursor->get_next();
+    }
+ 
+    return $first_node; 
+}
+
+sub find {
+  # finds a subnode based on criteria
+  my $me = shift();
+  my $match = shift(); # hash of criteria
+  my $found;
+
+  my $cursor = $me;
+  while($cursor) {
+    $found = $cursor;
+    my %attribs = %{$cursor->get_attribs()};
+    foreach  (keys %{$match}) {
+      if ($attribs{$_} ne $match->{$_}) {
+        $found = undef;
+        last;
+      }
+    }
+    return $found if $found;
+    if($cursor->get_child()) {
+      $found = $cursor->get_child()->find($match);
+      return $found if $found;
+    }
+    $cursor = $cursor->get_next();
+  }
+ 
+  return undef;
+}
+
 
 sub get_previous_or_parent() {
   my $me = shift;
