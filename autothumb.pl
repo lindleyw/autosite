@@ -2,7 +2,7 @@
 
 # makeindex.pl
 # 
-# 	$Id: makeindex.pl,v 1.2 2003/05/06 15:21:58 bill Exp $
+# 	$Id: autothumb.pl,v 1.3 2005/03/25 17:13:42 bill Exp $
 #
 # Copyright (c) 2003, wlindley.com, l.l.c.  Scottsdale, AZ  www.wlindley.com
 #
@@ -14,6 +14,8 @@
 #    putting medium-sized pictures of <= 64K pixels in the med/ directory
 #    and thumbnails in the thumb/ directory.
 #    (Default for -s without -p is equivalent to 640x480)
+# ./makeindex.pl
+#    Uses IMAGES list and all settings from index.txt
 #
 # -t dir/    name thumbnail directory
 # -m dir/    name 'medium' image directory
@@ -24,6 +26,13 @@
 # -T n       limit thumbnails to n-by-n pixels (default: 64)
 # -u tfile   use template file and look for text files for each picture.
 #            also disables "nnn files, totaling nnn bytes"
+
+#
+# where sizes can be:
+#   250000    250,000 pixels maximum (e.g., 500x500)
+#   x100x100  exactly 100x100 pixels (may distort image)
+#   b200x200  Bounding box 200x200 (limits X and Y to fit within)
+#
 
 #
 # index.txt is read, and should be formatted with:
@@ -41,11 +50,12 @@
 #  LIST.IMAGE:                 # 'thumb' for thumbnails
 #                              # 'medium' for medium pictures
 #  LIST.BORDER:  n             # border size for image list
-#  TITLE.IMAGE: filename       # name of image for title.  Will create thumbdir/title.jpg
+#  TITLE.IMAGE:  filename      # name of image for title.  Will create thumbdir/title.jpg
 #                              # As a special case, will also create:
 #                              #   thumbdir/title200.jpg   (200x150)
 #                              #   thumbdir/title150.jpg   (150x300)
 #                              # That behaviour may be generalized in the future.
+#  TITLE.SIZES: size,size,     # List of sizes for title images
 #  LINKSTYLE:                  # 'medium' for links to medium sized pics
 #                              # 'full' for links to full (original) sized pictures
 #                              # 'none' for no links at all
@@ -57,22 +67,45 @@
 #  SHOWNAME:    0 or 1         # enable to display link name in list
 #  TEMPLATE:    filename       # path and filename to template file
 #  IMAGES:      file,file,...  # list of filenames, or wildcards --   IMAGES: *.jpg
+#  OUTPUT.FORMAT               # output format (jpeg, png) derives 'pnmtojpeg' or 'pnmtopng'
+#                              # ^^ other than jpeg not yet supported
+#  OUTPUT.SUFFIX               # e.g., 'jpeg' 'jpg' or 'png' derives 'thumb/output.jpeg'
+#  OUTPUT.HTML                 # name of HTML output file (default: empty, for STDOUT)
 
 use File::Basename;
+use Image::Size;
 
 use Getopt::Std;
 getopt  ('tmc:p:T:u:');
+
+BEGIN {
+    push @INC, dirname($0); # So we can find our own modules
+    # CVS revision
+    ($version) = '$Revision: 1.1' =~ /([\d\.]+)/;
+}
+
+use relative_path;
+
+#
+# FIND PBM TOOLS
+#
 
 my $pbm = "/usr/local/netpbm/bin/";
 
 unless (-e "${pbm}pnmscale") { $pbm = "/usr/bin/"; }
 unless (-e "${pbm}pnmscale") { die "Can't find PBM tools."; }
 
+# JPEG to PNM
 my $djpeg = "djpeg";
 unless (-e "${pbm}$djpeg") { $djpeg = "jpegtopnm"; }
 unless (-e "${pbm}$djpeg") { die "Can't locate JPEG-to-PNM"; }
 if ($djpeg eq "djpeg") { $djpeg .= ' -ppm ';}  # needs argument
 
+# GIF to PNM
+my $dgif = "giftopnm";
+unless (-e "${pbm}$dgif") { die "Can't locate GIF-to-PNM"; }
+
+# PNM to output format
 my $cjpeg = "cjpeg";
 unless (-e "${pbm}$cjpeg") { $cjpeg = "pnmtojpeg"; }
 unless (-e "${pbm}$cjpeg") { die "Can't locate PNM-to-JPEG"; }
@@ -91,9 +124,11 @@ my %template_content = ('title' => '', 'contents' => '',
 			thumb => 1, 'thumb.size' => '64x64', 'thumb.dir' => 'thumb',
 			medium => 0, 'medium.size' => 640*480, 'medium.dir' => 'med',
 			'list.type' => 'table', 'list.image' => 'thumb', 'list.columns' => '3',
-			'list.border' => 1,
+			'list.border' => 1, 'title.image' => '', 'title.sizes' => '150x130,200x150',
 			linkstyle => 'full', 'link.target' => '',
-			showsize => 0, showname => 0, images => '*.jpg',
+			showsize => 0, showname => 0, images => '',
+			'output.format' => 'jpeg', 'output.suffix' => '.jpg', 'output.html' => '',
+			'template.path' => '.',
 			);
 
 my %index_content = %template_content;
@@ -111,123 +146,7 @@ my $template = <<BLORT;
 </HTML>
 BLORT
 
-# ---
-# from -- http://www.bloodyeck.com/wwwis/wwwis
-# jpegsize : gets the width and height (in pixels) of a jpeg file
-# Andrew Tong, werdna@ugcs.caltech.edu           February 14, 1995
-# modified slightly by alex@ed.ac.uk
-sub jpegsize {
-  my($done)=0;
-  my($c1,$c2,$ch,$s,$length, $dummy)=(0,0,0,0,0,0);
-  my($a,$b,$c,$d);
-
-  if(read(IMAGE, $c1, 1)	&&
-     read(IMAGE, $c2, 1)	&&
-     ord($c1) == 0xFF		&&
-     ord($c2) == 0xD8		){
-    while (ord($ch) != 0xDA && !$done) {
-      # Find next marker (JPEG markers begin with 0xFF)
-      # This can hang the program!!
-      while (ord($ch) != 0xFF) { return(0,0) unless read(IMAGE, $ch, 1); }
-      # JPEG markers can be padded with unlimited 0xFF's
-      while (ord($ch) == 0xFF) { return(0,0) unless read(IMAGE, $ch, 1); }
-      # Now, $ch contains the value of the marker.
-      if ((ord($ch) >= 0xC0) && (ord($ch) <= 0xC3)) {
-	return(0,0) unless read (IMAGE, $dummy, 3);
-	return(0,0) unless read(IMAGE, $s, 4);
-	($a,$b,$c,$d)=unpack("C"x4,$s);
-	return ($c<<8|$d, $a<<8|$b );
-      } else {
-	# We **MUST** skip variables, since FF's within variable names are
-	# NOT valid JPEG markers
-	return(0,0) unless read (IMAGE, $s, 2);
-	($c1, $c2) = unpack("C"x2,$s);
-	$length = $c1<<8|$c2;
-	last if (!defined($length) || $length < 2);
-	read(IMAGE, $dummy, $length-2);
-      }
-    }
-  }
-  return (0,0);
-}
-
-sub gifsize {
-  my($type,$a,$b,$c,$d,$s)=(0,0,0,0,0,0);
-
-  if(read(IMAGE, $type, 6)	&&
-     $type =~ /GIF8[7,9]a/	&&
-     read(IMAGE, $s, 4) == 4	){
-    ($a,$b,$c,$d)=unpack("C"x4,$s);
-    return ($b<<8|$a,$d<<8|$c);
-  }
-  return (0,0);
-}
-
-#-----
-
-sub image_size {
-    # Returns width, height of image
-    my $fname = shift;
-    my @size;
-
-    if (-e $fname) {
-	open IMAGE, $fname;
-	binmode IMAGE;
-	@size = jpegsize() if $fname =~ /\.jpe?g$/i;
-	@size = gifsize() if $fname =~ /\.gif$/i;
-	close IMAGE;
-	return @size;
-    } else {
-	print STDERR "Image not found: $fname\n";
-    }
-    return undef;
-}
-
 # -----
-
-sub relative_path {
-    # Basically the inverse of normalize_path.
-    # Accepts two paths, and returns a relative path
-    # from the first to the second.
-    my ($from_file, $to_file) = @_;
-    my $relative_path='';
-    
-    $base_file =~ tr[\\][/];		# use forward slashes
-    ($from_file_name,$from_file_path,$from_file_suffix) = fileparse($from_file,'\..*');
-    ($to_file_name,  $to_file_path,  $to_file_suffix  ) = fileparse($to_file,  '\..*');
-    $from_file_path =~ tr[\\][/];		# use forward slashes (again, after fileparse)
-    $to_file_path   =~ tr[\\][/];
-    $from_file_path = '' if ($from_file_path eq './'); # in document root directory? ignore
-    $to_file_path = ''   if ($to_file_path   eq './');
-    my @from_paths = split('/',$from_file_path);
-    my @to_paths   = split('/',$to_file_path);
-
-    #print "  ($from_file_path, $to_file_path)\n";
-    #print "  from_paths: ", join(' ', @from_paths), "\n";
-    #print "  to_paths:   ", join(' ', @to_paths), "\n";
-
-    my $path_differs = 0;
-    for (my $i = 0; $i < scalar @from_paths; $i++) {
-	if ($path_differs) {
-	  $from_paths[$i] = '..';
-	  # Past a divergence, move back up out of 'from.'
-	} else {
-          if ($from_paths[$i] eq $to_paths[$i]) {
-	    $from_paths[$i] = $to_paths[$i] = ''; 
-	    # So far so good... no movement necessary
-          } else {
-	    $from_paths[$i] = '..';
-	    $path_differs++;
-          }
-	}
-    }
-    $relative_path = join('/', grep($_ ne '', @from_paths), 
-			  grep($_ ne '',@to_paths));
-    $relative_path .= "/" if length($relative_path);
-    $relative_path .= "$to_file_name$to_file_suffix";
-
-    return $relative_path;
-}
 
 sub add_content {
 
@@ -241,22 +160,30 @@ sub read_data {
 
     if (-e $fname) {
 	print STDERR "reading $fname\n" if $debug;
-	open (TEMPLATE, "<", $fname);
-	while (<TEMPLATE>) {
+	my $template;
+	open ($template, "<", $fname);
+	while (<$template>) {
 	    my ($key, $value) = /^\s*([\w.]+)\s*:\s*(.*)$/;
 	    $key = lc($key);
 	    if ($value =~ /<<\s*(\w+)/) { # here-document
 		my $stopword = $1;
 		$content{$key} = '';
-		while (<TEMPLATE>) {
+		while (<$template>) {
 		    last if /$stopword/; # end of here-doc
 		    $content{$key} .= $_;
 		}
 	    } else {
-		$content{$key} = $value;
+		if ($key eq 'include') {
+		    if (! -e $value) {   # prefer files in local directory
+			$value = $index_content{'template.path'} . $value; # also search template's directory
+		    }
+		    %content = read_data($value, %content);
+		} else {
+		    $content{$key} = $value;
+		}
 	    }
 	}
-	close TEMPLATE;
+	# close TEMPLATE;
     }
     return (%content);
 }
@@ -289,7 +216,8 @@ sub element_html {
 
 sub scale_size {
     my $size_spec = shift;
-    if ($size_spec =~ /x\s*(\d+)\s*[x|\*](\d+)/i) { # x100x100 = exactly 100x100 (may change aspect ratio)
+    if ($size_spec =~ /x\s*(\d+)\s*[x|\*](\d+)/i) {
+	# x100x100 = exactly 100x100 (may change aspect ratio)
 	return "-xsize $1 -ysize $2 "; 
     } elsif ($size_spec =~ /(\d+)\s*[x|\*](\d+)/) {
 	return "-xysize $1 $2 ";
@@ -298,12 +226,25 @@ sub scale_size {
     }
 }
 
+sub pixel_count {
+    my $size_spec = shift;
+    if ($size_spec =~ /x\s*(\d+)\s*[x|\*](\d+)/i) {
+	# x100x100 = exactly 100x100 (may change aspect ratio)
+	return $1 * $2;
+    } elsif ($size_spec =~ /(\d+)\s*[x|\*](\d+)/) {
+	return $1 * $2;
+    } else {
+	return $size_spec;
+    }
+}
+
+
 my $b = 1;
 
 sub cutter_command {
     my ($size_spec, $pic_width, $pic_height) = @_;
     return '' unless length($pamcut);
-    if  ($size_spec =~ /(\d+)\s*[x|\*](\d+)/) {
+    if  ($size_spec =~ /^\s*(\d+)\s*[x|\*]\s*(\d+)\s*$/) {
 
 	print STDERR "current [$pic_width,$pic_height] ";
 	my ($want_x, $want_y) = ($1, $2);
@@ -318,6 +259,7 @@ sub cutter_command {
 	} else {
 	    $new_height = $pic_width / $want_x * $want_y;
 	}
+	$new_height ||= 1;  # avoid /0 errors if can't find
 	print STDERR " new [$new_width, $new_height]", $new_width / $new_height;
 
 	my $xmargin = int($pic_width/2 - $new_width/2) ;
@@ -332,6 +274,43 @@ sub cutter_command {
     return '';
 }
 
+sub resize_image {
+    my ($from_image, $to_image, $to_size) = @_;
+
+    my ($from_width, $from_height) = imgsize ($from_image); # from Image::Size
+    my $scale_size = scale_size($to_size);
+    my $current_width, $current_height;
+
+    # If source image is already smaller than desired target, use source.
+    ($current_width, $current_height) = imgsize ($from_image);
+    return $from_image if (($current_width * $current_height) <= pixel_count($to_size));
+
+    # Do not overwrite existing targets of larger size than we will create.
+    if (-e $to_image) {
+	($current_width, $current_height) = imgsize ($to_image);
+	return $to_image if (($current_width * $current_height) > pixel_count($to_size));
+    }
+    # Create derivative picture, unless it exists and is newer than original file.
+    unless (-e $to_image && -s $to_image && ((-M $to_image) < (-M $from_image))) {
+#	my $picsize = scale_size($index_content{"${pic}.size"}, $width, $height);
+	my $picsize = scale_size($to_size, $from_width, $from_height);
+	print STDERR "creating $to_image with: $to_size\n" if $debug;
+	my $cutter = cutter_command($to_size, $from_width, $from_height);
+	my $mixdown = ($from_image =~ /.gif$/) ? "$pbm$dgif" : "$pbm$djpeg";
+	my $command = "$mixdown $from_image | $cutter ${pbm}pnmscale $scale_size | $pbm$cjpeg > $to_image";
+	print STDERR $command;
+	system ($command);
+    }
+    return $to_image;
+
+}
+
+#
+#
+#  BEGIN MAIN PROGRAM
+#
+#
+
 if ($opt_u) {
     open (TEMPLATE, "<", $opt_u);
     $template = '';
@@ -339,7 +318,8 @@ if ($opt_u) {
     close TEMPLATE;
 
     # Replace href and src with relative paths
-    $template =~ s/\b(href|src)\s*=\s*['"]([^'"]+)['"]/qq{$1="} . relative_path($opt_u, $2) . qq{"}/ge;
+    $template =~ s/\b(href|src)\s*=\s*['"]([^'"]+)['"]/qq{$1="} . Path::relative($opt_u, $2) . qq{"}/ge;
+    ($index_content{'template.name'}, $index_content{'template.path'}, $index_content{'template.suffix'}) = fileparse($opt_u, "\..*");
     %index_content = read_data('index.txt', %template_content);
 }
 
@@ -385,13 +365,22 @@ if ($index_content{'medium'}) {
 }
 
 my $column = 0;
-if ($index_content{'list.type'} eq 'table') {
+if (lc($index_content{'list.type'}) eq 'table') {
     add_content ("<TABLE><TR>\n");
-} elsif ($index_content{'list.type'} eq 'ul') {
+} elsif (lc($index_content{'list.type'}) eq 'ul') {
     add_content ("<UL>\n");
 }
 
-while (<>) {
+# List of images to process
+my @file_list;
+if ($index_content{'images'}) {
+    @file_list = glob($index_content{'images'});
+    my $x = join('|', @file_list);
+} else {
+    @file_list = <>;   # from STDIN
+}
+
+foreach (@file_list) {
     chomp;
     s/\*//;
     my $list_pic;
@@ -402,38 +391,34 @@ while (<>) {
     my $size_text;
     my %link_attrs;
 
-    if (/\.jpe?g$/i) {
+    my ($from_file_name,$from_file_path,$from_file_suffix) = fileparse($_,'\..*');
+
+    if ($from_file_suffix =~ /\.(jpe?g|gif)$/i) {
 
 	$index_content{'full.name'} = $_;
-	my $base_file = $_;
-	$base_file =~ s/\.jpe?g//i;
-	my $text_file = "${base_file}.txt";
-	my $html_file = "${base_file}.html";
 
+	my $text_file = "${from_file_name}.txt";    # input text configuration for this picture
+	# Text file also could be in picture source directory
+	$text_file = "$from_file_path/$text_file" if ((! -e $text_file) && $from_file_path);
+
+	my $html_file = "${from_file_name}.html";   # output HTML, into current directory
 
 	foreach my $pic (qw{medium thumb}) {   # create selected derivative pictures
 	    if ($index_content{$pic}) {
-		my $picname = $index_content{"${pic}.dir"} . "/$_";
-		$index_content{"${pic}.name"} = $picname;
 		my $source = $index_content{'full.name'};
+		my $target = "${pic}.name";
+		my $suggested_target_name = $index_content{"${pic}.dir"} . "/${from_file_name}$index_content{'output.suffix'}";
+
+		# Optimization: If creating both, use medium pic from 1st pass to create thumbnail.
 		if (($pic eq 'thumb') && ($index_content{'medium'})) {
 		    $source = $index_content{"medium.name"};
 		}
-		my ($width, $height) = image_size ($source);
-		# Create derivative picture, unless it exists and is newer than original file.
-		unless (-e $picname && -s $picname && ((-M $picname) < (-M $_))) {
-		    my $picsize = scale_size($index_content{"${pic}.size"}, $width, $height);
-		    print STDERR "creating $picname with: $picsize\n" if $debug;
-		    my $cutter = cutter_command($index_content{"${pic}.size"}, $width, $height);
-		    my $command = "$pbm$djpeg $source | $cutter ${pbm}pnmscale $picsize | $pbm$cjpeg > $picname";
-		    print STDERR $command;
-		    system ($command);
-		}
+		$index_content{$target} = resize_image($source, $suggested_target_name, $index_content{"${pic}.size"});
 	    }
 	}
 
 	$list_pic   = $index_content{$index_content{'list.image'} . '.name'};
-	$linked_pic = $index_content{$index_content{'linkstyle'} . '.name'};
+	$linked_pic = $index_content{lc($index_content{'linkstyle'}) . '.name'};
 	$link_to = $linked_pic;   # by default, we link to the picture
 
 	if (-e $text_file) {
@@ -471,7 +456,7 @@ while (<>) {
     my $img_text = element_html('img', src=> $list_pic, border => $index_content{'list.border'});
     my $entry_text = "$a_text$img_text$linkname_text$size_text$a_end";
 
-    if ($index_content{'list.type'} eq 'table') {
+    if (lc($index_content{'list.type'}) eq 'table') {
 	add_content ("<TD align='center' valign='middle'>$entry_text</TD>\n");
 	my $new_row = 1;
 	if ($index_content{'list.columns'}) {
@@ -481,21 +466,39 @@ while (<>) {
 	    add_content( "</TR>\n<TR>\n");
 	    $column = 0;
 	}
-    } elsif ($index_content{'list.type'} eq 'ul') {
+    } elsif (($index_content{'list.type'}) eq 'ul') {
 	add_content("<LI>$entry_text</LI>\n");
     } else {
 	add_content("<P>$entry_text</P>\n");
     }
 }
 
-if ($index_content{'list.type'} eq 'table') {
+if ($index_content{'title.image'}) {
+#    my $source = $index_content{''} . $index_content{'title.image'};
+    my $source = $index_content{'title.image'};
+    foreach my $size (split(',', $index_content{'title.sizes'})) {
+	$size =~ s/\s+//g;       # remove spaces
+	my $size_spec = $size;
+	$size_spec =~ s/x\d+//;  # 200x150 -> 200
+	my $target = $index_content{"thumb.dir"} . "/title_$size_spec$index_content{'output.suffix'}";
+	resize_image($source, $target, $size);
+    }
+}
+
+if (lc($index_content{'list.type'}) eq 'table') {
     add_content ("</TABLE>\n");
-} elsif ($index_content{'list.type'} eq 'ul') {
+} elsif (lc($index_content{'list.type'}) eq 'ul') {
     add_content ("</UL>\n");
 }
 
 add_content("$total_files files, totalling $total_size bytes.\n") if ($index_content{'showsize'});
 
-print replace_content($template, %index_content);
+if ($index_content{'output.html'}) {
+    open OUTFILE, ">", $index_content{'output.html'} or die "Can't open output file";
+    print OUTFILE replace_content($template, %index_content);
+    close OUTFILE;
+} else {
+    print replace_content($template, %index_content);
+}
 
 exit 1;

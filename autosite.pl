@@ -1085,7 +1085,7 @@ sub _contents_of {
 sub _contents {
     # Base routine for contents() and full_contents()
     my ($root, $style, $recurse) = @_;
-    print STDERR "_contents ($root, $style, $recurse)\n";
+    print STDERR "_contents ($root, $style, $recurse)\n" if $debug;
     my $level = 0;
     my $html = '';
 
