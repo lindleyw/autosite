@@ -19,8 +19,13 @@
 
 my $debug;
 my $warnings;
+my $create_navigation;
+my $version;
 
 use File::Basename;
+use File::Glob;
+use Image::Size;
+
 
 BEGIN {
   push @INC, dirname($0); # So we can find our own modules
@@ -31,6 +36,7 @@ BEGIN {
 
 use URI::URL;
 use Cwd;
+use relative_path;
 
 # use  autosite.pl [-c config_file.htm] mainfile.htm
 # Can specify full pathnames to either config file or main HTML file.
@@ -43,17 +49,28 @@ use Getopt::Std;
 BEGIN {
     # Currently the only command line argument with parameters is -c <template_file>
     getopt ('c:');
-    $warnings = $opt_w;
-    $debug    = $opt_d;
+    $warnings = $::opt_w;
+    $debug    = $::opt_d;
+    $create_navigation = $::opt_n;
 }
 
 use TransientBaby;
-use TransientBits (template_file => $opt_c || 'site_template.html');
+use TransientBits (template_file => $::opt_c || 'site_template.html');
 use TransientTreeBuilder;
 
 # -----------------------------
 
-my %file_info;
+sub combine_css {
+    my ($hashref, $css_string) = @_;
+    my %values = %{$hashref};
+    while ($css_string =~ /([\w.]+)\s*:\s*([^;]+)\s*;?/g) {
+      $values{$1} = $2;
+    }
+    return %values;
+}
+
+
+our %file_info;
 
 sub file_info {
     # Set or get information about a file.
@@ -78,95 +95,12 @@ sub unresolved {
     my @unresolved;
 
     foreach my $select (qw{needed needs}) {
-	push @unresolved, grep { length($_) &&  (file_info($_,$select)) } (keys %file_info);
+	push @unresolved, grep { length($_) &&  (file_info($_,$select) && !file_info($_,'missing')) } (keys %file_info);
     }
     return @unresolved;
 }
 
 # -----------------------------
-
-# fileparse_set_fstype("MSDOS");		# Normally inherits from $^O
-
-sub normalize_path {
-    # INPUTS:
-    #  * file location (e.g., an HTML file)
-    #  * a path relative to that file.
-    # Returns a normalized path.  EXAMPLES:
-    # ("P:members\index.htm", "../images/logo.gif") -> 'P:images/logo.gif'
-    #	NOTE: the above is actually a relative path on drive P:
-    # ("P:\web\members\index.htm", "../images/logo.gif") -> 'P:/web/images/logo.gif'
-
-    my ($base_file, $rel_link) = @_;
-    $base_file =~ tr[\\][/];		# use forward slashes
-    my ($base_file_name,$base_file_path,$base_file_suffix) = fileparse($base_file,'\..*');
-
-    my $rel_fragment;
-    $rel_fragment = $1 if ($rel_link =~ s/(\#\w*$)//); # remove fragment part
-    return $rel_fragment unless length($rel_link);  # link was fragment only
-
-    #if (($rel_link =~ /\@/) || ($rel_link !~ /\.\w{3,}/)) {
-    #	print "SUSPECT LINK [$rel_link] in $base\n";
-    #}
-
-    my ($rel_link_name,$rel_link_path,$rel_link_suffix) = fileparse($rel_link,'\..*');
-    $base_file_path =~ tr[\\][/];		# use forward slashes (again, after fileparse)
-    $rel_link_name =~ tr[\\][/];
-    # Append path, unless relative to current directory:
-    $base_file_path .= $rel_link_path unless ($rel_link_path =~ m{^\.[\\\/]$});
-
-    # Resolve '../' relative paths
-    while ($base_file_path =~ s[[\w\-]+./\.\./][]g) {};
-    # Concatenate path, name, and suffix
-    $rel_link = $base_file_path . $rel_link_name . $rel_link_suffix . $rel_fragment;
-    $rel_link =~ s[/\./][/]g;           # also change any "xyz/./foo"  to "xyz/foo"
-    $rel_link =~ s[^\./][];		# current directory is implied!
-#    print "NAME = $base_file_name\nPATH = $base_file_path\nSUFFIX = $base_file_suffix\n";
-#    print "-----> $rel_link\n";
-    return $rel_link;
-}
-
-sub relative_path {
-    # Basically the inverse of normalize_path.
-    # Accepts two paths, and returns a relative path
-    # from the first to the second.
-    my ($from_file, $to_file) = @_;
-    my $relative_path='';
-    
-    ($from_file_name,$from_file_path,$from_file_suffix) = fileparse($from_file,'\..*');
-    ($to_file_name,  $to_file_path,  $to_file_suffix  ) = fileparse($to_file,  '\..*');
-    $from_file_path =~ tr[\\][/];		# use forward slashes (again, after fileparse)
-    $to_file_path   =~ tr[\\][/];
-    $from_file_path = '' if ($from_file_path eq './'); # in document root directory? ignore
-    $to_file_path = ''   if ($to_file_path   eq './');
-    my @from_paths = split('/',$from_file_path);
-    my @to_paths   = split('/',$to_file_path);
-
-    #print "  ($from_file_path, $to_file_path)\n";
-    #print "  from_paths: ", join(' ', @from_paths), "\n";
-    #print "  to_paths:   ", join(' ', @to_paths), "\n";
-
-    my $path_differs = 0;
-    for (my $i = 0; $i < scalar @from_paths; $i++) {
-	if ($path_differs) {
-	  $from_paths[$i] = '..';
-	  # Past a divergence, move back up out of 'from.'
-	} else {
-          if ($from_paths[$i] eq $to_paths[$i]) {
-	    $from_paths[$i] = $to_paths[$i] = ''; 
-	    # So far so good... no movement necessary
-          } else {
-	    $from_paths[$i] = '..';
-	    $path_differs++;
-          }
-	}
-    }
-    $relative_path = join('/', grep($_ ne '', @from_paths), 
-			  grep($_ ne '',@to_paths));
-    $relative_path .= "/" if length($relative_path);
-    $relative_path .= "$to_file_name$to_file_suffix";
-
-    return $relative_path;
-}
 
 my $toc_true_location;
 
@@ -176,7 +110,7 @@ sub true_location {
     my $fname = shift;
     return undef unless defined $fname;
     return '' unless length($fname);
-    return normalize_path($toc_true_location, $fname);
+    return Path::normalize($toc_true_location, $fname);
 }
 
 # -----------------------------
@@ -188,105 +122,79 @@ sub is_local {
     return !$is_remote;
 }
 
+my %file_type_regex = (
+                     'html'  => qr/<HTML/i,
+                     'style' => qr/{[^\}]+:[^\}]+;[^\}]*}/,
+                     'param' => qr/^\s*\w+\s*:\s*\w+/,
+                     );
+
 sub is_file_test {
-    # Returns TRUE if a file is HTML.
+    # Returns TRUE if a file appears to be HTML, CSS, etc.
     my ($fname, $filetype, $regex) = @_;
+    $regex ||= $file_type_regex{$filetype};    # Default regular expressions for known filetypes
     $filetype = "is_$filetype"; # as saved in file_info
 
     if (exists $file_info{$fname} && exists $file_info{$fname}{$filetype}) {
 	return file_info($fname, $filetype);
     }
 
+    # Remember and return failure
     return (file_info($fname, $filetype, 0)) unless is_local($fname);
     my $true_fname = true_location($fname);
     return (file_info($fname, $filetype, 0)) unless ((-e $true_fname) && (-T $true_fname));
-    open IS_HTML_FILE, $true_fname;
-    read(IS_HTML_FILE, my $header, 1024); # Assumes leading <!...> less than 1K
-    close IS_HTML_FILE;
+    open IS_FILE, $true_fname;
+    read(IS_FILE, my $header, 1024); # Assumes leading <!...> less than 1K
+    close IS_FILE;
     # return TRUE if it looks like we have a start tag.  Also save the value.
     return(file_info($fname, $filetype, $header =~ /$regex/));
 }
 
 sub is_html { # test for HTML
-    return is_file_test(shift, 'html', qr/<HTML/i);
+    return is_file_test(shift, 'html');
 }
 
 sub is_style { # test for CSS
-    return is_file_test(shift, 'style', qr/{[^\}]+:[^\}]+;[^\}]*}/);
+    return is_file_test(shift, 'style');
 }
 
-# ---
-# from -- http://www.bloodyeck.com/wwwis/wwwis
-# jpegsize : gets the width and height (in pixels) of a jpeg file
-# Andrew Tong, werdna@ugcs.caltech.edu           February 14, 1995
-# modified slightly by alex@ed.ac.uk
-sub jpegsize {
-  my($done)=0;
-  my($c1,$c2,$ch,$s,$length, $dummy)=(0,0,0,0,0,0);
-  my($a,$b,$c,$d);
-
-  if(read(IMAGE, $c1, 1)	&&
-     read(IMAGE, $c2, 1)	&&
-     ord($c1) == 0xFF		&&
-     ord($c2) == 0xD8		){
-    while (ord($ch) != 0xDA && !$done) {
-      # Find next marker (JPEG markers begin with 0xFF)
-      # This can hang the program!!
-      while (ord($ch) != 0xFF) { return(0,0) unless read(IMAGE, $ch, 1); }
-      # JPEG markers can be padded with unlimited 0xFF's
-      while (ord($ch) == 0xFF) { return(0,0) unless read(IMAGE, $ch, 1); }
-      # Now, $ch contains the value of the marker.
-      if ((ord($ch) >= 0xC0) && (ord($ch) <= 0xC3)) {
-	return(0,0) unless read (IMAGE, $dummy, 3);
-	return(0,0) unless read(IMAGE, $s, 4);
-	($a,$b,$c,$d)=unpack("C"x4,$s);
-	return ($c<<8|$d, $a<<8|$b );
-      } else {
-	# We **MUST** skip variables, since FF's within variable names are
-	# NOT valid JPEG markers
-	return(0,0) unless read (IMAGE, $s, 2);
-	($c1, $c2) = unpack("C"x2,$s);
-	$length = $c1<<8|$c2;
-	last if (!defined($length) || $length < 2);
-	read(IMAGE, $dummy, $length-2);
-      }
-    }
-  }
-  return (0,0);
-}
-
-sub gifsize {
-  my($type,$a,$b,$c,$d,$s)=(0,0,0,0,0,0);
-
-  if(read(IMAGE, $type, 6)	&&
-     $type =~ /GIF8[7,9]a/	&&
-     read(IMAGE, $s, 4) == 4	){
-    ($a,$b,$c,$d)=unpack("C"x4,$s);
-    return ($b<<8|$a,$d<<8|$c);
-  }
-  return (0,0);
+sub is_param {
+    return is_file_test(shift, 'param');
 }
 
 #-----
+
+sub file_contents {
+    my $file = shift;
+    my $file_text='';
+    my $fhandle;
+    open ($fhandle, "<", true_location($file)) ;
+    if ($fhandle) {
+      while (<$fhandle>) {
+          $file_text .= $_;
+      }
+      close ($fhandle);
+    } else {
+	print STDERR "Cannot open $file: $!\n";
+	return $file_text;
+    }
+}
 
 sub image_size {
     # Returns width, height of image
     my $fname = shift;
     my @size = (file_info($fname,'width'),file_info($fname,'height'));
-
+    
     return @size if ($size[0] && $size[1]); # already found
     my $true_fname = true_location($fname);
     if (-e $true_fname) {
-	open IMAGE, $true_fname;
-	binmode IMAGE;
-	@size = jpegsize() if $fname =~ /\.jpe?g$/i;
-	@size = gifsize() if $fname =~ /\.gif$/i;
-	close IMAGE;
-	file_info($fname,'width',$size[0]);
-	file_info($fname,'height',$size[1]);
-	return @size;
+      @size = imgsize($true_fname);      # from Image::Size
+      file_info($fname,'width',$size[0]);
+      file_info($fname,'height',$size[1]);
+      file_info($fname,'image_type',$size[2]);
+      read_param_for($true_fname);
+      return @size[0,1];
     } else {
-	print STDERR "Image not found: $true_fname\n";
+      file_info($fname,'error', "File not found: $true_fname");
     }
     return undef;
 }
@@ -384,23 +292,44 @@ my %link_relations = (
 		      #  '--' suggests the <link> be untouched during processing
 		      );
 
+my $param_file_suffix = '.txt';              # if a .txt file exists for a .jpg (.gif etc) file, use that for description etc.
+
 my %thumb_defaults = (
     'thumb.regex' => '.*\.jpe?g',
     'thumb.path'  => '.',
+    
     'thumb.small.size'      => '64x64',  # could be 100x100 (max size), 5000 (max pixels), x150x130 (distorting)
     'thumb.small.generate'  => 1, 
     'thumb.small.dir'       => 'thumb',
+    
     'thumb.medium.generate' => 0,
     'thumb.medium.size'     => 640*480,  # as small.size
     'thumb.medium.dir'      => 'med',
+    
     'thumb.list.type'       => 'table',  # could be: p (paragraph), ul (list), table 
+    'thumb.list.showsize'   => 0,        # true to show picture byte sizes
+    'thumb.list.showname'   => 0,        # true to show picture names
     'thumb.list.image'      => 'small',  # could be: small, medium, large
     'thumb.list.columns'    => '3',
     'thumb.list.border'     => 1,
-    'thumb.list.link'       => 'medium',  # could be: small, medium, large, none
-    'thumb.showsize'        => 0,         # true to show picture sizes
-    'thumb.showname'        => 0,         # true to show picture names
+    'thumb.list.class'      => '',       # HTML class of thumbnail list container (like ul or table element)
+    'thumb.list.entryclass' => '',       # HTML class of list entries (like li or td elements)
+    'thumb.list.imageclass' => '',       # HTML class of thumbnail images
+    
+    'thumb.link.style'      => 'html',    # link to:  html (created from template), image (bare .jpg), none
+    'thumb.link.image'      => 'medium',  # linked (target) image: small, medium, large, none (just images no links)
+    'thumb.link.suffix'     => '.html',
+    'thumb.link.target'     => '',        # '_blank' would create a new browser window
+
+    'thumb.output.format'   => 'jpg',     # jpg, png
+    'thumb.output.suffix'   => '.jpg',    # .jpg, .jpeg, ....etc
+
+    'thumb.title.image'     => '',        # name of image for title.  Will create thumbdir/title.jpg
+                                          # Will also create: thumb/150.jpg and thumb/200.jpg
+                                          # with default title.sizes.
+    'thumb.title.sizes'     => '150x130,200x150',
 );
+
 my $thumb_column = 0;
 
 # When inheriting header information from a template
@@ -418,15 +347,72 @@ my %inherit_headers = (
 # Otherwise, all the children of the root node are assumed to be chapters.
 my $site_explicit_chapters = 0; # TRUE if explicit chapters
 my $chapter_group = 0;          # used in contents_of to group chapters
-my @chapters; # files which are chapters
+
+our $base;
+our @chapters; # files which are chapters
+our @saved_chapters;
 
 my %stylesheets;
 my %external_links;
 
 # -----------------------------
 
-#use Date::Manip qw(ParseDate UnixDate);
-#$TZ = "PST";		# because MSDOS doesn't have a TZ variable
+sub read_data {
+    my $fname = shift;   # first arg is filename to read
+    my %content = @_;   # optionally followed by default values (e.g., from main template)
+    
+    if (-e $fname) {
+      print STDERR "reading $fname\n" if $debug;
+      my $template;
+      local $/ = "\n";    # in AutoSite, we have undef'd $/
+      open ($template, "<", $fname);
+      while (<$template>) {
+          my ($key, $value) = /^\s*([\w.]+)\s*:\s*(.*)$/;
+          $key = lc($key);
+          if ($value =~ /<<\s*(\w+)/) { # here-document
+              my $stopword = $1;
+              $content{$key} = '';
+              while (<$template>) {
+                  last if /$stopword/; # end of here-doc
+                  $content{$key} .= $_;
+              }
+          } else {
+              if ($key eq 'include') {
+                  # Look for:  1) file relative to current base's directory;
+                  # 2) file relative to TOC's directory
+                  # ~~ Ideally, give priority to searching CALLING TEMPLATE'S directory...
+                  #    which we would have to track.
+                  my $fname = Path::relative($base,$value);
+                  if (!is_param($fname)) {
+                      my ($base_file_name,$base_file_path,$base_file_suffix) = fileparse($value,'\..*');
+                      $fname = "$base_file_name$base_file_suffix"; # relative to TOC
+                  }
+                 if (is_param($fname)) {
+                      %content = read_data(true_location($value), %content);
+                  }
+              } else {
+                  $content{$key} = $value;
+              }
+          }
+      }
+      close ($template);
+    }
+    return (%content);
+}
+
+sub read_param_for {
+    # Reads a parameter file (with each line in the form: "attrib: value")
+    # for a given HTML or image file.  Argument is 'true_location' path.
+    
+    my $fname = shift;
+
+    my ($base_file_name,$base_file_path,$base_file_suffix) = fileparse($fname,'\..*');
+    my $param_file = "${base_file_path}${base_file_name}${param_file_suffix}";
+    if (is_param($param_file)) {
+      file_info($fname, 'param_file', $param_file);
+      file_info($fname, 'params', {read_data($param_file)});
+    }
+}
 
 sub is_root {
     # returns TRUE if the document is the root node
@@ -459,16 +445,16 @@ my $autotext = 0;
 sub process_quote {
     my ($node, $startflag, $depth) = @_;
 
-    if ($startflag) {
-	my $link = $node->attr('cite');
-	if (defined $link) {
-	    $link =~ s/#.*$//;				# Remove fragment part of link
-	    if (length($link)) {  # if it's an internal citation, it will be blank now.
-		$link = normalize_path($base,$link) if (is_local($link));
-		# do something here? ~~~~~~~~~~~~~~
-	    }
-	}
-    }
+#    if ($startflag) {
+#	my $link = $node->attr('cite');
+#	if (defined $link) {
+#	    $link =~ s/#.*$//;				# Remove fragment part of link
+#	    if (length($link)) {  # if it's an internal citation, it will be blank now.
+#		$link = Path::normalize($base,$link) if (is_local($link));
+#		# do something here? ~~~~~~~~~~~~~~
+#	    }
+#	}
+#    }
 
     return 1;
 }
@@ -504,8 +490,7 @@ sub process_meta {
 	    $value =~ s/\s*//g; # ignore spaces
 	    # <meta name="inherit" content="stylesheet"> inherits the stylesheet
 	    # which is a <link>; most others are <meta>.
-	    my $inherit_type  = $inherit_header{$content} ? 
-		$inherit_header{$content} : $inherit_headers{''}; # meta or link.
+	    my $inherit_type  = $inherit_headers{$content} || $inherit_headers{''}; # meta or link.
 	    # use <meta name="attr" content="value"> and <link rel="attr" href="value">
 	    my ($inherit_attr, $inherit_value) = ($inherit_type eq 'meta') ? 
 		('name', 'content') : ('rel', 'href');
@@ -522,7 +507,7 @@ sub process_meta {
 	    my $newvalue = file_info( $file_source, $value); # value from template or site root
 	    if ($inherit_value == 'href') {
 		# $file_source assumed to be in site root directory
-		$newvalue = relative_path($base, $newvalue); 
+		$newvalue = Path::relative($base, $newvalue); 
 	    }
 
 	    # Add a new tag with the inherited value
@@ -545,7 +530,7 @@ sub process_a {
     $link =~ s/#.*$//;				# Remove fragment part of link
     return unless length($link);
     if (is_local($link)) {
-	$link = normalize_path($base,$link);
+	$link = Path::normalize($base,$link);
 	#print "LINK TO: $link ... is_html=", is_html($link), "\n";
 	if (is_html($link)) {
 	    # Count links to this page
@@ -578,7 +563,7 @@ sub process_a {
 		    
 		    # Remember child and other relations.
 		    $relation = $tracked_relation{$relation};
-		    my @children = @{file_info($base, $relation)};
+		    my @children = @{file_info($base, $relation) || []};
 		    my %links = map { $_ => 1 } @children;
 		    # print " ($base,$relation) = ", file_info($base,$relation), "\n";;
 		    # Set reverse relation in this node
@@ -625,11 +610,11 @@ sub process_a {
 		# use a relative path for relations we create ("head", "parent", etc.)
 		my $new_href = file_info($base, $relation);
 		# If it's just a fragment, don't process it as a path.
-		$new_href = relative_path($base,$new_href) unless $new_href =~ /^#/;
+		$new_href = Path::relative($base,$new_href) unless $new_href =~ /^#/;
 		$node->attr('href', $new_href);
 		#print "\tSetting HREF of $relation to $new_href\n";
 	    } elsif ($relation eq 'toc' || $relation eq 'contents') {
-		$node->attr('href', relative_path($base,file_info('/','toc')));
+		$node->attr('href', Path::relative($base,file_info('/','toc')));
 	    } else {
 		# print "\tIgnoring $relation in $base\n";
 	    }
@@ -640,7 +625,7 @@ sub process_a {
 
 	}
 
-	$link = normalize_path($base,$node->attr('href'));		# May have been changed above.
+	$link = Path::normalize($base,$node->attr('href'));		# May have been changed above.
 	#print " >>> $link\n";
 	if ($link eq '#') {
 	    # $node->attr('alt','');			# Erase old alt text
@@ -669,9 +654,11 @@ sub process_link {
     my $relation = $node->attr('rel');
     my $link = $node->attr('href');
     my $alt_link;
+    my $file_type = $node->attr('type');
+    $file_type = lc($1) if ($file_type =~ m{^text/(\w+)}i);     # text/css becomes just css
 
     if (length($link) && is_local($link)) { # It's a local (not remote) file.
-	$link = normalize_path($base,$link);  # file defaults to be relative to caller's directory
+	$link = Path::normalize($base,$link);  # file defaults to be relative to caller's directory
 
 	# GOAL: Allow .html files to move around in the directory tree
 	# structure.  This means that templates, and stylesheets, may
@@ -700,20 +687,42 @@ sub process_link {
 	    print STDERR "Cannot find source file $link in $base\n";
 	    # fall through with normal processing of this file, ignoring the <link>.
 	}
-    } elsif ($relation =~ /^template$/i) {
+    } elsif ($relation =~ /^(?:(\w+)\.)?template$/i) {
+	my $template_type = $1;
 	$link = $alt_link if (!is_html($link) && is_html($alt_link));
-	my $rel_link = relative_path($base, $link);
+	my $rel_link = Path::relative($base, $link);
 	$node -> attr('href', $rel_link);
 
-	print STDERR "  TEMPLATE of $base is $link [", relative_path($base, $link),"] \n" if $warnings;
+	print STDERR "  $relation of $base is $link [$rel_link]\n" if $warnings;
+	
+	if ($template_type) {  # Only processing is to read in the file as plaintext
+           unless (file_info($link, 'plaintext')) {
+               # Read other templates as plaintext and put in file_info
+               file_info($base, $relation, $link);
+               file_info($link, 'template_type', $template_type);
+               my $file_text = file_contents($link);
+               if ($file_text) {
+                   file_info($link, 'plaintext', $file_text);
+                   file_info($link, 'keep_plaintext',  1);
+                  file_info($link, 'readonly',  1);
+                   file_info($link, 'is_html',  1);
+               } else {
+                   print STDERR "   Template file $link not found.\n";
+                   return 0;
+               }
+           }
+           return 1;
+       }
+
 	if (is_html($link)) {
 	    unless (file_info($link, 'parse_tree')) {
 		# flag the template as Needed, and return 0 to ignore this file for now.
 		# even if we have seen the file before, we need to save its parse tree as a template.
 		file_info($link, 'needed', 1);
+		print  STDERR "  process_link: $base needs $link.\n" if $debug;
 		file_info($link, 'is_template', 1);
 		file_info($base, 'needs', 1);
-		file_info($base, 'template', relative_path($base, $link));
+		file_info($base, $relation, $rel_link);
 		return 0;
 	    }
 
@@ -721,8 +730,8 @@ sub process_link {
 	    do_template($node, $link);
 
 	} else {
-	    print STDERR "Cannot find template file $link in $base\n";
-	    # fall through with normal processing of this file, ignoring the <link>.
+	    print STDERR "Cannot find HTML template file $link in $base\n";
+	    # fall through, ignoring the <link>.
 	}
     } elsif ($relation =~ /^stylesheet/i) {
 	# For convenience in editing sites and moving files into new directories,
@@ -733,7 +742,7 @@ sub process_link {
 	$link = $alt_link if (!is_style($link) && is_style($alt_link));
 	if (is_style($link)) {
 	    $stylesheets{$link}++;
-	    my $rel_link = relative_path($base, $link);
+	    my $rel_link = Path::relative($base, $link);
 	    print STDERR "  STYLESHEET of $base is $link [$rel_link] \n" if $warnings;
 	    file_info($base, 'stylesheet', $rel_link);
 	    $node -> attr('href', $rel_link);
@@ -774,7 +783,7 @@ sub process_link {
 
 sub process_head {
     my ($node, $startflag, $depth) = @_;
-    if (($startflag == 0) && (file_info($base, 'link_navigation') || $opt_n)) {
+    if (($startflag == 0) && (file_info($base, 'link_navigation') || $create_navigation)) {
 	foreach my $linkrel (keys %link_relations) {
 	    my $decorated_relation = $link_relations{$linkrel};
 	    next if ($decorated_relation =~ /\#/);  # do not generate
@@ -791,7 +800,7 @@ sub process_head {
 	    foreach my $value (@values) {
 		my $title = file_info($value, 'navtitle');
 		$title = file_info($value, 'title') unless $title;
-		$value = relative_path($base, $value);
+		$value = Path::relative($base, $value);
 		$node->get_previous()->push_content("<link rel=\"$linkrel\" href=\"$value\" title=\"$title\">\n");
 	    }
 	}
@@ -804,7 +813,7 @@ sub process_img {
     my $preview = $node->attr('src');
     my $img_src_rel_path;
     if (is_local($preview)) {
-	$img_src_rel_path = normalize_path($base,$preview);
+	$img_src_rel_path = Path::normalize($base,$preview);
 	if ($img_src_rel_path =~ /\.(gif|jpe?g)$/) {
 	    my ($file_width, $file_height) = image_size($img_src_rel_path);
 	    if (!defined $file_width) {
@@ -846,7 +855,7 @@ sub process_img {
 		$link = $node->parent()->attr('href'); # find new link
 	    }
 
-	    my $href_rel_path = normalize_path($base, $link);
+	    my $href_rel_path = Path::normalize($base, $link);
 	    my $alt_text = '';
 
 	    if ($link ne '#' && length($link) ) {
@@ -873,32 +882,47 @@ sub process_img {
 
 sub process_autosite {
     my ($node, $startflag, $depth) = @_;
+    my $replacement_text;
+    my $skip_created_relations = 1; # by default, any children or other tracked relations
+       # created by autosite code are ignored.
 
     if ($startflag && $node->attr('class') =~ /^chapter_group/i) {
 	$chapter_group = $node->attr('title') || '~~';  # either the title, or '~~' for default
+    } elsif ($startflag && $node->attr('class') =~ /^subtemplate/i) {
+      # <div class="subtemplate" title="param=value; param=value">
+      do_subtemplate($node);
+    } elsif ($startflag && $node->attr('class') =~ /^thumbnail/i) {
+      # <div class="thumbnail" title="param=value; param=value">
+# Until code is enabled -- wl 2005-10-20
+#      $replacement_text = do_thumbnails($node->attr('title'));
+      $skip_created_relations = 0; # actually consider created children
     } elsif ($startflag && $node->attr('class') =~ /^autosite/i) {
 	# <DIV CLASS="autosite" ID="function.with.args">...</DIV> have their
 	# content removed and replaced with text from function('with','args')
-	$node->delete_content(1); # delete all content
 
-	# ~~~~~~~~~~~~~~~~~~~
-	# following assumes ID tag contains name of routine which generates output.
-	# NOT happy with use strict 'refs' -- 
-	# should be probably changed to code like tag_processor below. 
-	# ~~~~~~~~~~~~~~~~~~~
+	# The following assumes ID tag contains name of routine which
+	# generates output.  Call of arbitrary function might be
+	# unsafe, should be probably changed to code like
+	# tag_processor below.
 	my @args = split /\./, $node->attr('id'); # subroutine name and all args
 	my $to_call = shift @args; # sub given first
     
-	my $new_text = $to_call->(@args) if $to_call;   # soft reference
-
-	# Now -- process *that* text as if it had occurred at this point in the file.
-	$autotext++;
+	{
+           no strict;
+           $replacement_text = $to_call->(@args) if $to_call;   # soft reference
+	}
+    }
+	
+    # Process replacement text as if it had occurred at this point in the file.
+    if (length ($replacement_text)) {
+	$node->delete_content(1); # delete all content
+	$autotext += $skip_created_relations;
 	my $h = new TransientTreeBuilder; 
 	$h->ignore_unknown(0); $h->warn(1); $h->implicit_tags(0);
-	$h->parse($new_text);
+	$h->parse($replacement_text);
 	$h->traverse(\&process_entry);   # don't you love re-entrant code?
 	$node->push_content($h->as_HTML());
-	$autotext--;
+	$autotext -= $skip_created_relations;
     }
 
     return 1;
@@ -1021,6 +1045,16 @@ sub linkify {
     return "<A HREF=\"$link\"$class$id$style>$text</A>";
 }
 
+sub param { # Insert a parameter from the accompanying text file.
+    my ($param) = @_;
+    my $parameters = file_info($base, 'params');
+    if (ref $parameters eq 'HASH') {  # retrieve from text parameter file.
+      my $value = $$parameters{$param};
+      return $value if defined $value;
+    }
+    return file_info($base, $param);  # fall back to returning file's global parameter (e.g., 'title')
+}
+
 ######################
 
 sub _contents_of {
@@ -1031,7 +1065,7 @@ sub _contents_of {
     if (($style =~ /\bfull\b/i) || length($title) == 0) { # wants full title, or no navigation title
 	$title = file_info($node, 'title') ;
     }
-    my $link_html = linkify(relative_path($base, $node), $title, chapter_type($node),$id);
+    my $link_html = linkify(Path::relative($base, $node), $title, chapter_type($node),$id);
 
     if ($style =~ /\bul\b/i) {
 	$my_html = "$link_html";
@@ -1061,7 +1095,7 @@ sub _contents_of {
 
     my $html = '';
     $html = $my_pre_html;
-    my @children = @{file_info($node, 'child')};
+    my @children = @{file_info($node, 'child') || []};
     if (scalar @children) {
 	$html .= "$my_html$pre_html";
 	foreach (@children) {
@@ -1135,10 +1169,9 @@ sub sidenav_element {
     unless (file_info($node, 'seen')) { # flag forward reference
 	file_info($base, 'needs', 1);
     }
-    my $node_title = file_info($node, 'navtitle'); # short title for navigation bar
 
-    # default to regular title:
-    $node_title = file_info($node, 'title') unless $node_title; 
+    # title will be navigation-title, else regular title
+    my $node_title = file_info($node, 'navtitle') || file_info($node, 'title'); 
 
     my $group_heading = file_info($node, 'chapter_group');
     if ($group_heading) {
@@ -1164,7 +1197,7 @@ sub sidenav_element {
     } else {
 	$link_prefix = "&nbsp;&nbsp;" x $level;
     }
-    my $link_html = linkify(relative_path($base, $node), $node_title,
+    my $link_html = linkify(Path::relative($base, $node), $node_title,
 			    $nav_class, $nav_id, $nav_style);
     return "$divider_prefix$link_prefix$link_html$link_suffix";
 }
@@ -1261,16 +1294,32 @@ sub sidenav {
     return $return_html;
 }
 
+# ----------------
+
+sub _makerelative {
+    # Changes HTML which is written to be relative to the site's root, to be relative
+    # to the given file.
+    # ~~~ Ideally, change this to permit the original HTML to be relative to anywhere
+    # in the site, but currently $old_base is ignored.
+    my ($text, $old_base, $new_base) = @_;
+    # print "makerelative:  [[ $text ]] -> ";
+    $text =~ s/(href|src|background)\s*=\s*"([^#\"]+)(\#[^\"]*)?"/"$1=\"" . Path::relative($new_base,$2) . "$3\""/sgie;
+    # print "[[ $text ]]\n";
+    return $text;
+}
+
 sub makerelative {
     # This calls a function, takes the HTML it returns, and rewrites
     # the links in it to be relative to the current page instead of the
     # document root.  NOTE: Must not process the "#anchor" part.
     my $func = shift;
-    my $text = $func->();
-    # print "makerelative:  [[ $text ]] -> ";
-    $text =~ s/(href|src|background)\s*=\s*"([^#\"]+)(\#[^\"]*)?"/"$1=\"" . relative_path($base,$2) . "$3\""/sgie;   
-    # print "[[ $text ]]\n";
-    return $text;
+    
+    my $text;
+    {
+      no strict;
+      $text = $func->();
+    }
+    return _makerelative($text, undef, $base);
 }
 
 # ----------------
@@ -1311,7 +1360,6 @@ sub thumb_make {
     }
 
 }
-
 
 sub thumbnails {
     # Insert thumbnails of images in current directory.
@@ -1408,6 +1456,167 @@ sub do_template {
 
 }
 
+sub do_subtemplate {
+    # The enclosed HTML becomes a new (internal) template from which children
+    # HTML files will be created.
+    my ($node) = @_;
+    
+    # Add parameters (as: "source: images; images: *.jpg *.gif; thumb.size: 100x100") to file info
+    my $info_text = $node->attr('title');
+    my %info;
+    my $param_ref = file_info($base,'params');
+    if (ref $param_ref eq 'HASH') {
+      %info = $$param_ref;
+    }
+    %info = combine_css( \%info, $info_text);    # Combine that with the "value: attrib; value: attrib" parameters
+    file_info($base, 'params', \%info);
+
+
+    # Create a copy of our parse tree under an internal name.  Make a
+    # scratch copy of the subtemplate division.  In the parse tree
+    # copy, replace the contents of the 'content' division with that
+    # of the 'subtemplate' division.
+
+    # For each the files to be created (look in the 'images' parameter)
+    # make an HTML file which is just a copy of the newly made template
+    # (derived from the original subtemplate).  Make these new HTML files
+    # children of the original file.
+
+
+    # PLAN:  use parameters like this --
+    #    source:   can be
+    #        'images'      (list of images from parameter, turned into thumbnail links)
+    #        'text'        (list of text files to be turned into HTML)
+}
+
+#-------------------
+#
+# File I/O
+#
+#-------------------
+
+sub read_file {
+    my $base = shift;
+    my $true_base = true_location($base);
+    my $parse_tree;
+
+    # Read file and parse its HTML unless we have already done so.
+    unless ($parse_tree = file_info($base, 'parse_tree')) {
+	my $text;
+	if ($text = file_info($base, 'plaintext')) {
+	    if (file_info($base, 'keep_plaintext')) {   # Remove as we are parsing here.
+		return 1;
+	    } else {
+		# Force processing of HTML.
+		file_info($base, 'plaintext', undef);
+	    }
+	} else {
+	    open FILE, $true_base;
+	    $text = <FILE>;
+	    close FILE;
+	}
+	
+	$text =~ s/<![a-zA-Z]+[^>]*>//;  # Remove offensive XML-ish tag foolishness
+	$text =~ s{/>}{>}g;              # likewise XMLishness
+	$parse_tree = new TransientTreeBuilder; 
+	
+	$parse_tree->ignore_unknown(0);
+	$parse_tree->warn(1);
+	$parse_tree->implicit_tags(0);
+	$parse_tree->parse($text);
+    }
+    return $parse_tree;
+}
+
+sub write_file {
+    # Writes a parsed file to disk
+    my $fname = shift;
+    my $parse_tree = shift || file_info($fname, 'parse_tree');
+
+    unless ($parse_tree) {
+	print STDERR "  ERROR! No Parse Tree for $fname\n";
+	return 0;
+    }
+    my $true_base = true_location($fname);
+    unless (file_info($fname, 'readonly')) {   
+	# stripped template sources are readonly so we don't gut the disk files
+	my $new_text = $parse_tree->as_HTML();
+	$new_text =~ s/\n{3,}/\n/g;    # bleurgh, happens with deletions of tags
+	print "WRITING: $fname [$true_base]\n" if $warnings;
+	open FILE, ">$true_base";
+	print FILE $new_text;
+	print FILE "\n";
+	close FILE;
+    }
+}
+
+#-------------------
+#
+# Website report
+#
+#-------------------
+
+sub write_report {
+    open REPORT, "> _report.html";
+    print REPORT "<html><head><title>Website Report</title></head><body>\n";
+    
+    print REPORT "<h1>Website Report as of " . scalar localtime() . "</h1>\n";
+    
+    print REPORT "<h2>Chapters</h2>\n";
+    if (@chapters) {
+	print REPORT "<ul>";
+	foreach (@chapters) {
+	    print REPORT "<li><a href='$_'>$_</a> " . (file_info($_, 'chapter') || '(implicit)') . "</li>\n";
+	}
+	print REPORT "</ul>\n";
+    } else {
+	print REPORT "<p>(none)</p>\n";
+    }
+    
+    print REPORT "<h2>External Links</h2>\n";
+    print REPORT "<table><tr><th>Link<th>from...</tr>\n";
+    foreach my $extfile (sort keys %external_links) {
+	print REPORT "<tr><td valign='top'><a href='$extfile'>$extfile</a></td><td>\n";
+	foreach my $linkfrom (keys %{$external_links{$extfile}}) {
+	    print REPORT "<a href='$linkfrom'>$linkfrom</a> ";
+	}
+	print REPORT "</td></tr>\n";
+    }
+    print REPORT "</table>\n";
+    
+    use attributes;
+    
+    print REPORT "<h2>File Information</h2>\n";
+    print REPORT "<blockquote><table>\n";
+    foreach my $pfile (sort keys %file_info) {
+	my @infos = sort keys %{$file_info{$pfile}};
+	my $info_count = scalar @infos || 1;
+	print REPORT "<tr><td valign='top' rowspan='$info_count'><a href='$pfile'>$pfile</a></td>\n";
+	foreach (@infos) {
+	    print REPORT "<td valign='top'>$_</td><td>";
+	    my $value = $file_info{$pfile}{$_};
+	    if ($value =~ /\.html?$/ && is_html($value)) {
+		$value = "<a href='$value'>$value</a>";
+	    }
+	    if ($debug) {   # Prettyprint a single level of hash
+		if (ref ($value) && attributes::reftype($value) eq 'HASH') {
+		    my %hashvalue = %{$value};
+		    $value = "<table>\n";
+		    foreach (sort keys %hashvalue) {
+			$value .= "<tr><td>$_</td><td>$hashvalue{$_}</td></tr>\n";
+		    }
+		    $value .= "</table>\n";
+		}
+	    }
+	    print REPORT "[$value]</td></tr>\n";
+	}
+	print REPORT "<tr><td colspan='3'><hr width='100%'></td></tr>\n";
+    }
+    print REPORT "</table></blockquote>\n<hr>";
+    
+    close REPORT;
+}
+
 #-------------------
 #
 # Main program
@@ -1420,7 +1629,12 @@ use File::DosGlob 'glob';  # override CORE::glob
 
 undef $/;
 
-@basefiles = glob $ARGV[0];
+unless (scalar @ARGV) {
+    print "Use:   autosite [-c site_template_file] index.html\n";
+    exit;
+}
+
+my @basefiles = glob $ARGV[0];
 
 $toc_true_location = $basefiles[0]; # First file is actual base, possibly with path
 
@@ -1428,7 +1642,7 @@ foreach $base (@basefiles) {
     unless (defined $base) {
         die "Must specify input file.\n";
     }
-    $base = relative_path($toc_true_location, $base); # use file's relative location in site
+    $base = Path::relative($toc_true_location, $base); # use file's relative location in site
     file_info("/","toc",$base) unless file_info("/","toc"); # Set collection's toc
     file_info($base,'needed',1);	# Set "Needed by other files" flag
 }
@@ -1462,37 +1676,25 @@ while (scalar (@files = unresolved())) {
 	    @chapters = ();
 	}
 
-	# Read file and parse its HTML unless we have already done so.
-	unless ($h = file_info($base, 'parse_tree')) {
-	    open FILE, $true_base;
-	    my $text = <FILE>;
-	    close FILE;
-	    
-	    $text =~ s/<![a-zA-Z]+[^>]*>//;  # Remove offensive XML-ish tag foolishness
-	    $h = new TransientTreeBuilder; 
 
-	    $h->ignore_unknown(0);
-	    $h->warn(1);
-	    $h->implicit_tags(0);
-	    $h->parse($text);
+       # Thumbnail templates and similar files are not actually part of the site
+       next if (file_info($base, 'plaintext') && file_info($base,'readonly'));
+
+	# Parse file's HTML, from cache if possible.
+       $h = read_file($base);
+       unless ($h) {
+           print stderr "  ERROR: Cannot parse $base.\n";
+           next;
 	}
 	    
-	$h->traverse(\&process_entry);
+	$h->traverse(\&process_entry) if ref($h);
 	
 	# if 'seen' 1, it's our first time thru... might have forward references within.
 	file_info($base,'seen', file_info($base, 'seen') + 1);
 
 	if (file_info($base,'needs') == 0) {
 	    # All dependencies resovled.  Safe to write it out.
-	    unless (file_info($base, 'readonly')) {
-		my $new_text = $h->as_HTML();
-		$new_text =~ s/\n{3,}/\n/g;    # bleurgh, happens with deletions of tags
-		print "WRITING: $base [$true_base]\n" if $warnings;
-		open FILE, ">$true_base";
-		print FILE $new_text;
-		print FILE "\n";
-		close FILE;
-	    }
+	    write_file($base, $h);
 	} else {
 	    print "     Flagged for reprocess: $base\n" if $debug;
 	    file_info($base,'needed',1);	# Show we must process it again
@@ -1516,7 +1718,6 @@ while (scalar (@files = unresolved())) {
 	    }
 	}
 
-#	if (file_info($base, 'needs') || file_info($base, 'needed') || file_info($base, 'is_template')) {
 	if (file_info($base, 'is_template')) {
 	    file_info($base, 'parse_tree', $h) unless file_info($base, 'parse_tree');
 	} else {
@@ -1526,58 +1727,6 @@ while (scalar (@files = unresolved())) {
     }
 }
 
-#-------------------
-#
-# Website report
-#
-#-------------------
-
-open REPORT, "> _report.html";
-print REPORT "<html><head><title>Website Report</title></head><body>\n";
-
-print REPORT "<h1>Website Report as of " . scalar localtime() . "</h1>\n";
-
-print REPORT "<h2>Chapters</h2>\n";
-if (@chapters) {
-    print REPORT "<ul>";
-    foreach (@chapters) {
-	print REPORT "<li><a href='$_'>$_</a> " . (file_info($_, 'chapter') || '(implicit)') . "</li>\n";
-    }
-    print REPORT "</ul>\n";
-} else {
-    print REPORT "<p>(none)</p>\n";
-}
-
-print REPORT "<h2>External Links</h2>\n";
-print REPORT "<table>\n";
-foreach my $extfile (sort keys %external_links) {
-    print REPORT "<tr><td><a href='$extfile'>$extfile</a></td><td>\n";
-    foreach my $linkfrom (keys %{$external_links{$extfile}}) {
-	print REPORT "<a href='$linkfrom'>$linkfrom</a> ";
-    }
-    print REPORT "</td></tr>\n";
-}
-print REPORT "</table>\n";
-
-
-print REPORT "<h2>File Information</h2>\n";
-print REPORT "<blockquote><table>\n";
-foreach my $pfile (sort keys %file_info) {
-    my @infos = sort keys %{$file_info{$pfile}};
-    my $info_count = scalar @infos || 1;
-    print REPORT "<tr><td valign='top' rowspan='$info_count'><a href='$pfile'>$pfile</a></td>\n";
-    foreach (@infos) {
-	print REPORT "<td>$_</td><td>";
-	my $value = $file_info{$pfile}{$_};
-	if ($value =~ /\.htm/ && is_html($value)) {
-	    $value = "<a href='$value'>$value</a>"
-	    }
-	print REPORT "[$value]</td></tr>\n";
-    }
-    print REPORT "<tr><td colspan='3'><hr width='100%'></td></tr>\n";
-}
-print REPORT "</table></blockquote>\n<hr>";
-
-close REPORT;
+write_report();
 
 __END__;

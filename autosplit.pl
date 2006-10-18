@@ -54,7 +54,7 @@ BEGIN {
   push @INC, dirname($0); # So we can find our own modules
 
   # CVS puts the revision here
-  ($version) = '$Revision: 1.5 $ ' =~ /([\d\.]+)/;
+  ($version) = '$Revision: 1.7 $ ' =~ /([\d\.]+)/;
 }
 
 # use:  autosplit.pl mainfile.htm
@@ -65,6 +65,8 @@ BEGIN { getopt ('c:');  print "[[[$opt_c]]]\n";}
 
 my $warnings = $opt_w;
 
+use relative_path;
+
     use TransientBaby;
 #    use TransientBits;
 #    use TransientHTMLTree;
@@ -72,68 +74,6 @@ my $warnings = $opt_w;
 
 # -----------------------------
 
-sub normalize_path {
-    # Accepts a file location (e.g., an HTML file), and a path relative to that file.
-    # Returns a normalized path.  EXAMPLES:
-    # ("P:members\index.htm", "../images/logo.gif") -> 'P:images/logo.gif'
-    #	NOTE: the above is actually a relative path on drive P:
-    # ("P:\web\members\index.htm", "../images/logo.gif") -> 'P:/web/images/logo.gif'
-
-    my ($base_file, $rel_link) = @_;
-    $base_file =~ tr[\\][/];		# use forward slashes
-    ($base_file_name,$base_file_path,$base_file_suffix) = fileparse($base_file,'\..*');
-    ($rel_link_name,$rel_link_path,$rel_link_suffix) = fileparse($rel_link,'\..*');
-    $base_file_path =~ tr[\\][/];		# use forward slashes (again, after fileparse)
-    $rel_link_name =~ tr[\\][/];
-    # Append path, unless relative to current directory:
-    $base_file_path .= $rel_link_path unless ($rel_link_path =~ m{^\.[\\\/]$});
-    # Resolve '../' relative paths
-    while ($base_file_path =~ s[\w+./\.\./][]g) {};
-    # Concatenate path, name, and suffix
-    $rel_link = $base_file_path . $rel_link_name . $rel_link_suffix;
-    $rel_link =~ s[^./][];		# current directory is implied!
-#    print "NAME = $base_file_name\nPATH = $base_file_path\nSUFFIX = $base_file_suffix\n";
-#    print "-----> $rel_link\n";
-    return $rel_link;
-}
-
-sub relative_path {
-    my ($from_file, $to_file) = @_;
-    my $relative_path='';
-    
-    $base_file =~ tr[\\][/];		# use forward slashes
-    ($from_file_name,$from_file_path,$from_file_suffix) = fileparse($from_file,'\..*');
-    ($to_file_name,  $to_file_path,  $to_file_suffix  ) = fileparse($to_file,  '\..*');
-    $from_file_path =~ tr[\\][/];		# use forward slashes (again, after fileparse)
-    $to_file_path   =~ tr[\\][/];
-    $from_file_path = '' if ($from_file_path eq './'); # in document root directory? ignore
-    $to_file_path = ''   if ($to_file_path   eq './');
-    my @from_paths = split('/',$from_file_path);
-    my @to_paths   = split('/',$to_file_path);
-
-#    print "  ($from_file_path, $to_file_path)\n";
-#    print "  from_paths: ", join(' ', @from_paths), "\n";
-#    print "  to_paths:   ", join(' ', @to_paths), "\n";
-
-    my $path_differs = 0;
-    for (my $i = 0; $i < scalar @from_paths; $i++) {
-	if ($path_differs) {
-	  $from_paths[$i] = '..';	# Past a divergence, move back up out of 'from.'
-	} else {
-          if ($from_paths[$i] eq $to_paths[$i]) {
-	    $from_paths[$i] = $to_paths[$i] = ''; # So far so good... no movement necessary
-          } else {
-	    $from_paths[$i] = '..';
-	    $path_differs++;
-          }
-	}
-    }
-    $relative_path = join('/', grep($_ ne '', @from_paths), grep($_ ne '',@to_paths));
-    $relative_path .= "/" if length($relative_path);
-    $relative_path .= "$to_file_name$to_file_suffix";
-    return $relative_path;
-
-}
 
 my $toc_true_location;
 
@@ -143,8 +83,7 @@ sub true_location {
     my $fname = shift;
     return undef unless defined $fname;
     return '' unless length($fname);
-    # print "@@@@@ true_location($fname) = ". normalize_path($toc_true_location, $fname) . "\n";
-    return normalize_path($toc_true_location, $fname);
+    return Path::normalize($toc_true_location, $fname);
 }
 
 sub is_local {
@@ -180,7 +119,7 @@ sub make_template {
 	# Info_tag being 'title' is preferable, as the 'style' of the template's <div id='content'> flows thru.
 	# Original use of 'style' deprecated as template HTML can't be properly edited with Mozilla Composer
 	# which enforces valid style tag components.
-	if ($node->attr('title') !~ /:/) { 
+	if (($node->attr('title') !~ /:/) && ($node->attr('style') =~ /:/)) { 
 	    $info_tag = 'style';                # use <div style="key: value">
 	}
 	$node->attr($info_tag,'');              # erase template's info in created pages
@@ -289,10 +228,14 @@ sub split_content {
 	} elsif ($tag eq 'br' && $saving_title) {
 	    $division_info{$current_division}{'title'} .= ' ';  # line break becomes space in title
 	}
-	my $id = $node->attr('id');
-	if ($id) {
+
+	if (my $id = $node->attr('id')) {
 	    $anchor_file{$id} = $current_division;
 	}
+	if ($tag eq 'a' && (my $name = $node->attr('name'))) {
+	    $anchor_file{$name} = $current_division;
+	}
+
 	if ($startflag && $suppress_class{$node->attr('class')}) {
 	    # Suppress this node, its contents, and any matching ending tag.
 	    $node->delete_content(1);
@@ -321,7 +264,7 @@ sub make_links_relative {
     my $tag = $node->tag();
     my $attrib_to_edit;
 
-    my $fname = normalize_path($base, split_filename($relative_current_node));
+    my $fname = Path::normalize($base, split_filename($relative_current_node));
 
     $attrib_to_edit = $attrib_edits{$tag};
     if ($attrib_to_edit) {
@@ -329,7 +272,7 @@ sub make_links_relative {
 	if ($value && is_local($value)) {
 	    # Intrapage fragments become intrasite links.
 	    # Assume the 'foo' division contains a subdivision 'bar'
-	    # with a tag <h2 id='blech'> ... in foo/ is quux.pdf and
+	    # with a tag <h2 id='blech'> ... directory foo/ contains quux.pdf and
 	    # in the site's root directory is blort.jpg .
 	    #
 	    #  href="#bar"       =>  "bar/index.html"       (top of page)
@@ -341,14 +284,14 @@ sub make_links_relative {
 		my $fragment = $2 ? "#$1" : ''; # Use "#foo#" to get "category/index.html#foo"
 		my $dest_file = split_filename($anchor);
 		if ($anchor && $dest_file) {
-		    my $relative_file = relative_path($fname, normalize_path($base, $dest_file));
+		    my $relative_file = Path::relative($fname, Path::normalize($base, $dest_file));
 		    $node->attr($attrib_to_edit, "$relative_file$fragment");
 		} else {
 		    print STDERR "  Unresolved link #$1 in $base\n";
 		}
 	    } elsif ($value !~ /^\./) {  # relative to actual location
 		$node->attr($attrib_to_edit,
-			    relative_path($fname, normalize_path($base, $node->attr($attrib_to_edit))));
+			    Path::relative($fname, Path::normalize($base, $node->attr($attrib_to_edit))));
 	    }
 	}
     }
@@ -364,9 +307,15 @@ sub make_links_relative {
 	my $metatype = $node->attr('name');
 	if ($division_info{$relative_current_node}{$metatype}) {
 	    $node->attr('content',$division_info{$relative_current_node}{$metatype});
+	    $division_info{$relative_current_node}{"$metatype_saved"} = 1;
 	}
     }
-
+    if ($tag eq 'head' && !$startflag) {
+	# If no <meta> for the navtitle, insert one.
+	unless ($division_info{$relative_current_node}{"navtitle_saved"}) {
+	    $node->get_previous()->push_content(qq{<meta name="navtitle" content="$division_info{$relative_current_node}{'navtitle'}">\n})
+	}
+    }
 }
 
 sub split_filename {
@@ -434,7 +383,7 @@ $content->traverse(\&split_content);
 
 {
     # Write the template file, just in case we're interested.
-    open FILE, ">" . normalize_path($base, "template.html");
+    open FILE, ">" . Path::normalize($base, "template.html");
     print FILE $template_html;
     close FILE;
 }
@@ -445,7 +394,7 @@ foreach my $output_file (keys %division_text) {
 #    print "[$output_file]\n";
 #    my $fname = normalize_path($base, split_filename($output_file));
     $division_info{$output_file}{'filename'} = 
-	normalize_path($base, 
+	Path::normalize($base, 
 		       $division_info{$output_file}{'split_filename'} =
 		       split_filename($output_file));
 #    print ">>> $output_file => $division_info{$output_file}{'split_filename'}", 
@@ -478,7 +427,7 @@ foreach my $output_file (sort keys %division_text) {
 	my $group;
 	foreach my $knode (@kids) {
 	    my $title = $division_info{$knode}{'title'};
-	    #$content_text .= "<!-- fname = $fname normalize_path = " . normalize_path($base,split_filename($knode)) ." -->\n";
+	    #$content_text .= "<!-- fname = $fname Path::normalize = " . Path::normalize($base,split_filename($knode)) ." -->\n";
 	    # Put simple links here.  They will be made properly relative below.
 	    my $link = split_filename($knode);
 	    my $relation = $division_info{$output_file}{'is_root'} ? 'chapter' : 'section';
